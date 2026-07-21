@@ -23,3 +23,6 @@
 [submodule "extern/openal-soft"]
 	path = extern/openal-soft
 	url = https://github.com/kcat/openal-soft.git
+[submodule "extern/LiteRT"]
+	path = extern/LiteRT
+	url = https://github.com/google-ai-edge/LiteRT.git

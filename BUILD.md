@@ -149,6 +149,13 @@ The installed-game path is resolved in this order:
 Symlinks point into the installed copy, so they break if you move or uninstall it; use
 `--copy` for a self-contained `baseq2/`. To build without staging, pass `--no-deploy`.
 
+### Upscaler model (Docker builds)
+
+`./build-linux.sh --docker` additionally fetches the QuickSRNetSmall TFLite model
+(float + w8a8 variants, verified against a pinned checksum) into `baseq2/models/`, for
+the experimental LiteRT-based upscaler (`USE_LITE_RT`). Native builds skip this. To fetch
+it standalone, run `./deploy-assets.sh --with-upscaler-model`.
+
 ### Full game vs demo
 
 The staged `pak0.pak` from the Steam install is the **demo** data. For the full game, add

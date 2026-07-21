@@ -100,6 +100,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 	SHADER_MODULE_DO(QVK_MOD_FSR_EASU_FP32_COMP)                     \
 	SHADER_MODULE_DO(QVK_MOD_FSR_RCAS_FP16_COMP)                     \
 	SHADER_MODULE_DO(QVK_MOD_FSR_RCAS_FP32_COMP)                     \
+	SHADER_MODULE_DO(QVK_MOD_UPSCALER_PACK_COMP)                     \
+	SHADER_MODULE_DO(QVK_MOD_UPSCALER_UNPACK_COMP)                   \
 	SHADER_MODULE_DO(QVK_MOD_NORMALIZE_NORMAL_MAP_COMP)              \
 	SHADER_MODULE_DO(QVK_MOD_DEBUG_LINE_FRAG)                        \
 	SHADER_MODULE_DO(QVK_MOD_DEBUG_LINE_VERT)                        \
@@ -207,6 +209,7 @@ typedef struct QVK_s {
 	bool                        supports_colorspace;
 	bool                        supports_debug_lines;
 	bool                        supports_smooth_lines;
+	bool                        supports_dma_buf;
 
 	cmd_buf_group_t             cmd_buffers_graphics;
 	cmd_buf_group_t             cmd_buffers_transfer;
@@ -321,6 +324,10 @@ extern QVK_t qvk;
 #define LIST_EXTENSIONS_DEBUG \
 	VK_EXTENSION_DO(vkDebugMarkerSetObjectNameEXT) \
 
+#define LIST_EXTENSIONS_EXTERNAL_MEMORY \
+	VK_EXTENSION_DO(vkGetMemoryFdKHR) \
+	VK_EXTENSION_DO(vkGetMemoryFdPropertiesKHR) \
+
 #define LIST_EXTENSIONS_INSTANCE \
 	VK_EXTENSION_DO(vkCmdBeginDebugUtilsLabelEXT) \
 	VK_EXTENSION_DO(vkCmdEndDebugUtilsLabelEXT)
@@ -329,6 +336,7 @@ extern QVK_t qvk;
 LIST_EXTENSIONS_ACCEL_STRUCT
 LIST_EXTENSIONS_RAY_PIPELINE
 LIST_EXTENSIONS_DEBUG
+LIST_EXTENSIONS_EXTERNAL_MEMORY
 LIST_EXTENSIONS_INSTANCE
 #undef VK_EXTENSION_DO
 
@@ -494,6 +502,9 @@ void create_orthographic_matrix(mat4_t matrix, float xmin, float xmax,
 	PROFILER_DO(FSR,                        1) \
 	PROFILER_DO(FSR_EASU,                   2) \
 	PROFILER_DO(FSR_RCAS,                   2) \
+	PROFILER_DO(UPSCALER,                   1) \
+	PROFILER_DO(UPSCALER_PACK,              2) \
+	PROFILER_DO(UPSCALER_UNPACK,            2) \
 	PROFILER_DO(UPDATE_ENVIRONMENT,         1) \
 	PROFILER_DO(GOD_RAYS,                   1) \
 	PROFILER_DO(GOD_RAYS_REFLECT_REFRACT,   1) \
@@ -584,6 +595,12 @@ void vkpt_submit_command_buffer_simple(
 void set_current_gpu(VkCommandBuffer cmd_buf, int gpu_index);
 
 VkResult allocate_gpu_memory(VkMemoryRequirements mem_req, VkDeviceMemory* pMemory);
+VkResult allocate_gpu_memory_exportable(VkMemoryRequirements mem_req, VkExternalMemoryHandleTypeFlagBits handle_type, VkDeviceMemory* pMemory);
+VkResult get_memory_fd(VkDeviceMemory memory, VkExternalMemoryHandleTypeFlagBits handle_type, int* out_fd);
+VkResult create_image_dma_buf(const VkImageCreateInfo *base_image_create_info, VkImage *image, VkDeviceMemory *image_mem, VkDeviceSize *image_size);
+VkResult create_image_from_dma_buf_fd(int fd, const VkImageCreateInfo *base_image_create_info, VkImage *image, VkDeviceMemory *image_mem);
+VkResult create_buffer_dma_buf(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer *buffer, VkDeviceMemory *buffer_mem);
+VkResult create_buffer_from_dma_buf_fd(int fd, VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer *buffer, VkDeviceMemory *buffer_mem);
 
 #ifdef VKPT_DEVICE_GROUPS
 void vkpt_mgpu_global_barrier(VkCommandBuffer cmd_buf);
@@ -699,6 +716,15 @@ bool vkpt_fsr_needs_upscale(void);
 void vkpt_fsr_update_ubo(QVKUniformBuffer_t *ubo);
 VkResult vkpt_fsr_do(VkCommandBuffer cmd_buf);
 VkResult vkpt_fsr_final_blit(VkCommandBuffer cmd_buf, bool warp);
+
+void vkpt_upscaler_init_cvars(void);
+VkResult vkpt_upscaler_initialize(void);
+VkResult vkpt_upscaler_destroy(void);
+VkResult vkpt_upscaler_create_pipelines(void);
+VkResult vkpt_upscaler_destroy_pipelines(void);
+bool vkpt_upscaler_is_enabled(void);
+VkResult vkpt_upscaler_do(VkCommandBuffer cmd_buf);
+VkResult vkpt_upscaler_final_blit(VkCommandBuffer cmd_buf, bool warp);
 
 VkResult vkpt_bloom_initialize(void);
 VkResult vkpt_bloom_destroy(void);

@@ -25,6 +25,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 extern cvar_t *cvar_profiler_scale;
 extern cvar_t *cvar_pt_reflect_refract;
 extern cvar_t *cvar_flt_fsr_enable;
+extern cvar_t *cvar_flt_upscaler_enable;
 extern cvar_t *cvar_profiler_samples;
 
 // Performance marker debug labels
@@ -345,6 +346,12 @@ draw_profiler(int enable_asvgf)
 		PROFILER_DO(PROFILER_FSR, 1);
 		PROFILER_DO(PROFILER_FSR_EASU, 2);
 		PROFILER_DO(PROFILER_FSR_RCAS, 2);
+	}
+	if(cvar_flt_upscaler_enable->integer != 0)
+	{
+		PROFILER_DO(PROFILER_UPSCALER, 1);
+		PROFILER_DO(PROFILER_UPSCALER_PACK, 2);
+		PROFILER_DO(PROFILER_UPSCALER_UNPACK, 2);
 	}
 #undef PROFILER_DO
 

@@ -175,6 +175,8 @@ VkptInit_t vkpt_initialization[] = {
 	{ "tonemap|", vkpt_tone_mapping_create_pipelines,  vkpt_tone_mapping_destroy_pipelines,  VKPT_INIT_RELOAD_SHADER,      0 },
 	{ "fsr",      vkpt_fsr_initialize,                 vkpt_fsr_destroy,                     VKPT_INIT_DEFAULT,            0 },
 	{ "fsr|",     vkpt_fsr_create_pipelines,           vkpt_fsr_destroy_pipelines,           VKPT_INIT_RELOAD_SHADER,      0 },
+	{ "upscaler",  vkpt_upscaler_initialize,           vkpt_upscaler_destroy,                VKPT_INIT_DEFAULT,            0 },
+	{ "upscaler|", vkpt_upscaler_create_pipelines,     vkpt_upscaler_destroy_pipelines,       VKPT_INIT_RELOAD_SHADER,      0 },
 
 	{ "physicalSky", vkpt_physical_sky_initialize,         vkpt_physical_sky_destroy,            VKPT_INIT_DEFAULT,        0 },
 	{ "physicalSky|", vkpt_physical_sky_create_pipelines,  vkpt_physical_sky_destroy_pipelines,  VKPT_INIT_RELOAD_SHADER,  0 },
@@ -411,6 +413,7 @@ QVK_t qvk = {
 LIST_EXTENSIONS_ACCEL_STRUCT
 LIST_EXTENSIONS_RAY_PIPELINE
 LIST_EXTENSIONS_DEBUG
+LIST_EXTENSIONS_EXTERNAL_MEMORY
 LIST_EXTENSIONS_INSTANCE
 #undef VK_EXTENSION_DO
 
@@ -467,7 +470,9 @@ static const char *optional_instance_extension_name[NUM_OPTIONAL_INSTANCE_EXTENS
 #define OPTIONAL_DEVICE_EXTENSIONS					\
 	VK_OPT_EXT_DO(VK_KHR_LINE_RASTERIZATION)		\
 	VK_OPT_EXT_DO(VK_KHR_SHADER_NON_SEMANTIC_INFO)	\
-	VK_OPT_EXT_DO(VK_EXT_DEBUG_MARKER)
+	VK_OPT_EXT_DO(VK_EXT_DEBUG_MARKER)				\
+	VK_OPT_EXT_DO(VK_KHR_EXTERNAL_MEMORY_FD)		\
+	VK_OPT_EXT_DO(VK_EXT_EXTERNAL_MEMORY_DMA_BUF)
 
 enum optional_device_extension_id
 {
@@ -1493,11 +1498,18 @@ init_vulkan(void)
 		LIST_EXTENSIONS_DEBUG
 	}
 
+	if(available_optional_device_extensions[OPT_EXT_VK_KHR_EXTERNAL_MEMORY_FD])
+	{
+		LIST_EXTENSIONS_EXTERNAL_MEMORY
+	}
+
 #undef VK_EXTENSION_DO
 
 	Com_Printf("-----------------------\n");
 
 	qvk.supports_colorspace = available_optional_instance_extensions[OPT_EXT_VK_EXT_SWAPCHAIN_COLOR_SPACE];
+	qvk.supports_dma_buf = available_optional_device_extensions[OPT_EXT_VK_KHR_EXTERNAL_MEMORY_FD]
+		&& available_optional_device_extensions[OPT_EXT_VK_EXT_EXTERNAL_MEMORY_DMA_BUF];
 
 	return true;
 }
@@ -1660,6 +1672,7 @@ destroy_vulkan(void)
 	LIST_EXTENSIONS_ACCEL_STRUCT
 	LIST_EXTENSIONS_RAY_PIPELINE
 	LIST_EXTENSIONS_DEBUG
+	LIST_EXTENSIONS_EXTERNAL_MEMORY
 	LIST_EXTENSIONS_INSTANCE
 #undef VK_EXTENSION_DO
 
@@ -3310,8 +3323,13 @@ R_RenderFrame_RTX(refdef_t *fd)
 		}
 		END_PERF_MARKER(post_cmd_buf, PROFILER_TONE_MAPPING);
 
-		// Skip FSR (upscaling) if image is going to be heavily blurred anyway (menu mode)
-		if(vkpt_fsr_is_enabled() && !qvk.frame_menu_mode)
+		// Skip FSR/NPU upscaling if image is going to be heavily blurred anyway (menu mode).
+		// The two are mutually exclusive alternatives for the same upscale-to-display-res step.
+		if (vkpt_upscaler_is_enabled() && !qvk.frame_menu_mode)
+		{
+			vkpt_upscaler_do(post_cmd_buf);
+		}
+		else if(vkpt_fsr_is_enabled() && !qvk.frame_menu_mode)
 		{
 			vkpt_fsr_do(post_cmd_buf);
 		}
@@ -3599,7 +3617,11 @@ R_EndFrame_RTX(void)
 	if (frame_ready)
 	{
 		bool waterwarp = (vkpt_refdef.fd->rdflags & RDF_UNDERWATER) && cvar_pt_waterwarp->integer;
-		if (vkpt_fsr_is_enabled() && !qvk.frame_menu_mode)
+		if (vkpt_upscaler_is_enabled() && !qvk.frame_menu_mode)
+		{
+			vkpt_upscaler_final_blit(cmd_buf, waterwarp);
+		}
+		else if (vkpt_fsr_is_enabled() && !qvk.frame_menu_mode)
 		{
 			vkpt_fsr_final_blit(cmd_buf, waterwarp);
 		}
@@ -3853,6 +3875,7 @@ R_Init_RTX(bool total)
 
 	drs_init();
 	vkpt_fsr_init_cvars();
+	vkpt_upscaler_init_cvars();
 
 	// Minimum NVIDIA driver version - this is a cvar in case something changes in the future,
 	// and the current test no longer works.

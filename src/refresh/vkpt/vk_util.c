@@ -456,6 +456,134 @@ VkResult allocate_gpu_memory(VkMemoryRequirements mem_req, VkDeviceMemory* pMemo
 
 }
 
+VkResult allocate_gpu_memory_exportable(VkMemoryRequirements mem_req, VkExternalMemoryHandleTypeFlagBits handle_type, VkDeviceMemory* pMemory)
+{
+	VkMemoryAllocateInfo mem_alloc_info = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		.allocationSize = mem_req.size,
+		.memoryTypeIndex = get_memory_type(mem_req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+	};
+
+	VkExportMemoryAllocateInfo export_alloc_info = {
+		.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
+		.handleTypes = handle_type
+	};
+	mem_alloc_info.pNext = &export_alloc_info;
+
+#ifdef VKPT_DEVICE_GROUPS
+	VkMemoryAllocateFlagsInfo mem_alloc_flags = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+		.flags = VK_MEMORY_ALLOCATE_DEVICE_MASK_BIT,
+		.deviceMask = (1 << qvk.device_count) - 1
+	};
+
+	if (qvk.device_count > 1) {
+		export_alloc_info.pNext = &mem_alloc_flags;
+	}
+#endif
+
+	return vkAllocateMemory(qvk.device, &mem_alloc_info, NULL, pMemory);
+}
+
+VkResult get_memory_fd(VkDeviceMemory memory, VkExternalMemoryHandleTypeFlagBits handle_type, int* out_fd)
+{
+	VkMemoryGetFdInfoKHR get_fd_info = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR,
+		.memory = memory,
+		.handleType = handle_type
+	};
+
+	return qvkGetMemoryFdKHR(qvk.device, &get_fd_info, out_fd);
+}
+
+// Creates a storage buffer whose backing memory can be exported as a dma_buf
+// fd (VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT), so it can be handed to
+// LiteRT's QNN dispatch backend as a tensor buffer without a CPU round trip.
+VkResult
+create_buffer_dma_buf(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer *buffer, VkDeviceMemory *buffer_mem)
+{
+	VkExternalMemoryBufferCreateInfo external_buffer_info = {
+		.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+		.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+	};
+
+	VkBufferCreateInfo buffer_create_info = {
+		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+		.pNext = &external_buffer_info,
+		.size = size,
+		.usage = usage,
+		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+	};
+
+	_VK(vkCreateBuffer(qvk.device, &buffer_create_info, NULL, buffer));
+	ATTACH_LABEL_VARIABLE(*buffer, BUFFER);
+
+	VkMemoryRequirements mem_req;
+	vkGetBufferMemoryRequirements(qvk.device, *buffer, &mem_req);
+
+	VkResult alloc_result = allocate_gpu_memory_exportable(mem_req, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, buffer_mem);
+	if (alloc_result != VK_SUCCESS)
+		return alloc_result;
+
+	ATTACH_LABEL_VARIABLE(*buffer_mem, DEVICE_MEMORY);
+
+	_VK(vkBindBufferMemory(qvk.device, *buffer, *buffer_mem, 0));
+
+	return VK_SUCCESS;
+}
+
+// Creates a storage buffer whose backing memory is imported from a dma_buf fd
+// produced elsewhere (e.g. a LiteRT output tensor buffer). Importing takes
+// ownership of `fd` -- the caller must dup() it first if it still needs a
+// reference of its own.
+VkResult
+create_buffer_from_dma_buf_fd(int fd, VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer *buffer, VkDeviceMemory *buffer_mem)
+{
+	VkExternalMemoryBufferCreateInfo external_buffer_info = {
+		.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+		.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+	};
+
+	VkBufferCreateInfo buffer_create_info = {
+		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+		.pNext = &external_buffer_info,
+		.size = size,
+		.usage = usage,
+		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+	};
+
+	_VK(vkCreateBuffer(qvk.device, &buffer_create_info, NULL, buffer));
+	ATTACH_LABEL_VARIABLE(*buffer, BUFFER);
+
+	VkMemoryRequirements mem_req;
+	vkGetBufferMemoryRequirements(qvk.device, *buffer, &mem_req);
+
+	VkMemoryFdPropertiesKHR fd_props = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR,
+	};
+	_VK(qvkGetMemoryFdPropertiesKHR(qvk.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fd, &fd_props));
+
+	VkImportMemoryFdInfoKHR import_info = {
+		.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+		.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+		.fd = fd,
+	};
+
+	VkMemoryAllocateInfo mem_alloc_info = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		.pNext = &import_info,
+		.allocationSize = mem_req.size,
+		.memoryTypeIndex = get_memory_type(mem_req.memoryTypeBits & fd_props.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+	};
+
+	_VK(vkAllocateMemory(qvk.device, &mem_alloc_info, NULL, buffer_mem));
+	ATTACH_LABEL_VARIABLE(*buffer_mem, DEVICE_MEMORY);
+
+	_VK(vkBindBufferMemory(qvk.device, *buffer, *buffer_mem, 0));
+
+	return VK_SUCCESS;
+}
+
 void set_current_gpu(VkCommandBuffer cmd_buf, int gpu_index)
 {
 #ifdef VKPT_DEVICE_GROUPS

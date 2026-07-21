@@ -2161,6 +2161,88 @@ static VkResult create_image(const VkImageCreateInfo *image_create_info, VkImage
 	return VK_SUCCESS;
 }
 
+// Creates a linear-tiled image whose backing memory can be exported as a
+// dma_buf fd (VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT), so it can be
+// handed to LiteRT's QNN dispatch backend without a CPU round trip.
+VkResult
+create_image_dma_buf(const VkImageCreateInfo *base_image_create_info, VkImage *image, VkDeviceMemory *image_mem, VkDeviceSize *image_size)
+{
+	VkExternalMemoryImageCreateInfo external_image_info = {
+		.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+		.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+	};
+
+	VkImageCreateInfo image_create_info = *base_image_create_info;
+	image_create_info.tiling = VK_IMAGE_TILING_LINEAR;
+	image_create_info.pNext = &external_image_info;
+
+	_VK(vkCreateImage(qvk.device, &image_create_info, NULL, image));
+	ATTACH_LABEL_VARIABLE(*image, IMAGE);
+
+	VkMemoryRequirements mem_req;
+	vkGetImageMemoryRequirements(qvk.device, *image, &mem_req);
+
+	*image_size = align(mem_req.size, mem_req.alignment);
+
+	VkResult alloc_result = allocate_gpu_memory_exportable(mem_req, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, image_mem);
+	if (alloc_result != VK_SUCCESS)
+		return alloc_result;
+
+	ATTACH_LABEL_VARIABLE(*image_mem, DEVICE_MEMORY);
+
+	_VK(vkBindImageMemory(qvk.device, *image, *image_mem, 0));
+
+	return VK_SUCCESS;
+}
+
+// Creates a linear-tiled image whose backing memory is imported from a
+// dma_buf fd produced elsewhere (e.g. a LiteRT output tensor buffer).
+// Importing takes ownership of `fd` -- the caller must dup() it first if it
+// still needs a reference of its own.
+VkResult
+create_image_from_dma_buf_fd(int fd, const VkImageCreateInfo *base_image_create_info, VkImage *image, VkDeviceMemory *image_mem)
+{
+	VkExternalMemoryImageCreateInfo external_image_info = {
+		.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+		.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+	};
+
+	VkImageCreateInfo image_create_info = *base_image_create_info;
+	image_create_info.tiling = VK_IMAGE_TILING_LINEAR;
+	image_create_info.pNext = &external_image_info;
+
+	_VK(vkCreateImage(qvk.device, &image_create_info, NULL, image));
+	ATTACH_LABEL_VARIABLE(*image, IMAGE);
+
+	VkMemoryRequirements mem_req;
+	vkGetImageMemoryRequirements(qvk.device, *image, &mem_req);
+
+	VkMemoryFdPropertiesKHR fd_props = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR,
+	};
+	_VK(qvkGetMemoryFdPropertiesKHR(qvk.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fd, &fd_props));
+
+	VkImportMemoryFdInfoKHR import_info = {
+		.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+		.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+		.fd = fd,
+	};
+
+	VkMemoryAllocateInfo mem_alloc_info = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		.pNext = &import_info,
+		.allocationSize = mem_req.size,
+		.memoryTypeIndex = get_memory_type(mem_req.memoryTypeBits & fd_props.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+	};
+
+	_VK(vkAllocateMemory(qvk.device, &mem_alloc_info, NULL, image_mem));
+	ATTACH_LABEL_VARIABLE(*image_mem, DEVICE_MEMORY);
+
+	_VK(vkBindImageMemory(qvk.device, *image, *image_mem, 0));
+
+	return VK_SUCCESS;
+}
+
 VkResult
 vkpt_create_images()
 {

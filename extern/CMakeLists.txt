@@ -147,3 +147,56 @@ if (IS_64_BIT)
         target_compile_definitions(OpenAL PUBLIC AL_LIBTYPE_STATIC)
     endif()
 endif()
+
+#
+# LiteRT (experimental AI upscaler backend)
+#
+
+if(USE_LITE_RT)
+    set(LITERT_ENABLE_GPU OFF CACHE BOOL "" FORCE)
+    set(LITERT_ENABLE_NPU ON CACHE BOOL "" FORCE)
+    # Qualcomm QNN dispatch backend reaches the Hexagon NPU (HTP). Its headers
+    # (QAIRT_HEADERS_DIR) are auto-fetched by litert/vendors/CMakeLists.txt
+    # from Qualcomm's public "Community" QAIRT SDK download if not already
+    # set, so no manual SDK install is required to configure the build.
+    # The dispatch backend itself builds as a standalone plugin
+    # (libLiteRtDispatch_Qualcomm.so, litert/vendors/qualcomm/dispatch/) that
+    # LiteRT dlopen()s at runtime via kLiteRtEnvOptionTagDispatchLibraryDir --
+    # it is not linked into the `litert` interface target below. It must be
+    # deployed next to the game binary and the QNN runtime .so's for the
+    # target platform (aarch64-oe-linux-gcc11.2) staged from the same fetched
+    # QAIRT SDK tree (see deploy-assets.sh).
+    set(LITERT_ENABLE_QUALCOMM ON CACHE BOOL "" FORCE)
+    set(LITERT_ENABLE_SAMSUNG OFF CACHE BOOL "" FORCE)
+    set(TFLITE_ENABLE_GPU OFF CACHE BOOL "" FORCE)
+    set(LITERT_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+
+    # litert_c_api's INTERFACE_INCLUDE_DIRECTORIES and litert_runtime's
+    # open_cl_memory.cc/open_cl_sync.cc (unconditionally compiled, gated only
+    # at the class-body level by LITERT_HAS_OPENCL_SUPPORT) both need real
+    # <CL/cl.h> headers at ${CMAKE_BINARY_DIR}/opencl_headers even with GPU
+    # disabled, since tflite's own opencl_headers fetch is skipped when
+    # TFLITE_ENABLE_GPU=OFF. Fetch the same header-only repo/tag tflite uses.
+    include(FetchContent)
+    FetchContent_Declare(
+        opencl_headers
+        GIT_REPOSITORY https://github.com/KhronosGroup/OpenCL-Headers
+        GIT_TAG dcd5bede6859d26833cd85f0d6bbcee7382dc9b3
+        SOURCE_DIR "${CMAKE_BINARY_DIR}/opencl_headers"
+    )
+    FetchContent_Populate(opencl_headers)
+
+    add_subdirectory(LiteRT/litert)
+
+    # litert_c_api, litert_runtime, litert_core (and their satellite static
+    # libs) reference symbols back and forth across archive boundaries
+    # (e.g. litert_runtime calls into litert_c_api's option accessors, while
+    # litert_core tears down objects defined in litert_runtime). Plain
+    # left-to-right archive linking drops unresolved refs once an archive is
+    # passed, so wrap the whole closure in a RESCAN group to make the linker
+    # keep re-scanning until everything resolves.
+    add_library(litert INTERFACE IMPORTED GLOBAL)
+    target_link_libraries(litert INTERFACE
+        "$<LINK_GROUP:RESCAN,litert_c_api,litert_runtime,litert_core,litert_cc_api,litert_cc_internal,litert_core_cache,litert_core_model,litert_compiler_plugin,litert_logging,litert_c_options,litert_cc_options,tensorflow-lite>"
+    )
+endif()

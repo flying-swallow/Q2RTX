@@ -1,4 +1,4 @@
-cmake_minimum_required (VERSION 3.15)
+cmake_minimum_required (VERSION 3.20)
 cmake_policy(SET CMP0069 NEW)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -45,6 +45,7 @@ OPTION(USE_SYSTEM_ZLIB "Prefer system ZLIB instead of the bundled one" OFF)
 OPTION(USE_SYSTEM_OPENAL "Prefer system OpenAL Soft instead of the bundled one" OFF)
 OPTION(USE_SYSTEM_CURL "Prefer system cURL instead of the bundled one" OFF)
 OPTION(USE_SYSTEM_SDL2 "Prefer system SDL2 instead of the bundled one" OFF)
+OPTION(USE_LITE_RT "Enable experimental LiteRT-based AI upscaling (fetches extra dependencies at configure time)" ON)
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 # use dynamic zlib for steam runtime
