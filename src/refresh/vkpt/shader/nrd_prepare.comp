@@ -1,0 +1,175 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_nonuniform_qualifier : enable
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+#define GLOBAL_UBO_DESC_SET_IDX 0
+#include "global_ubo.h"
+#define GLOBAL_TEXTURES_DESC_SET_IDX 1
+#include "global_textures.h"
+#include "constants.h"
+#include "utils.glsl"
+#include "brdf.glsl"
+#include "projection.glsl"
+#include "nrd_common.glsl"
+
+vec3 nrd_linear_to_ycocg(vec3 color)
+{
+	return vec3(dot(color, vec3(0.25, 0.5, 0.25)),
+		dot(color, vec3(0.5, 0.0, -0.5)),
+		dot(color, vec3(-0.25, 0.5, -0.25)));
+}
+
+// NRD 4.18 REBLUR_FrontEnd_GetNormHitDist, using the shared SDK parameters.
+float reblur_hit_distance_normalization(float view_z, float roughness)
+{
+	const vec3 p = vec3(NRD_REBLUR_HIT_DISTANCE_A,
+		NRD_REBLUR_HIT_DISTANCE_B, NRD_REBLUR_HIT_DISTANCE_C);
+	float smc = (1.0 - exp2(-200.0 * roughness * roughness))
+		* pow(clamp(roughness, 0.0, 1.0), 0.5);
+	return (p.x + view_z * p.y) * mix(p.z, 1.0, smc);
+}
+
+// The UBO is populated once per frame, after the NRD instance has been
+// selected/recreated.  Collapse the cvar's float representation to the same
+// 0/1 mode used by the instance so both NRD passes make the same choice.
+int nrd_specular_mode()
+{
+	return global_ubo.flt_nrd_spec_denoiser >= 0.5 ? 1 : 0;
+}
+
+float nrd_view_z(ivec2 pixel, ivec2 frame_size, float radial_distance)
+{
+	float distance = abs(radial_distance);
+	if (distance >= float(PRIMARY_RAY_T_MAX))
+		return float(PRIMARY_RAY_T_MAX);
+
+	vec2 screen_pos = (vec2(pixel) + 0.5) / vec2(frame_size);
+	return max(projection_screen_to_view(screen_pos, distance, false).z, 0.0);
+}
+
+ivec2 checkerboard_source(ivec2 pixel)
+{
+	int half_width = int(global_ubo.width / 2);
+	bool even_field = ((pixel.x & 1) == (pixel.y & 1));
+	if (global_ubo.pt_swap_checkerboard != 0)
+		even_field = !even_field;
+	return ivec2(pixel.x / 2 + (even_field ? 0 : half_width), pixel.y);
+}
+
+vec3 load_direct_diffuse(ivec2 source)
+{
+	return unpackRGBE(texelFetch(TEX_PT_COLOR_HF, source, 0).x) / STORAGE_SCALE_HF;
+}
+
+vec3 load_indirect_diffuse(ivec2 source)
+{
+	SH sh = load_SH(TEX_PT_COLOR_LF_SH, TEX_PT_COLOR_LF_COCG, source);
+	return project_SH_irradiance(sh,
+		decode_normal(texelFetch(TEX_PT_NORMAL_A, source, 0).x)) / STORAGE_SCALE_LF;
+}
+
+vec3 load_specular(ivec2 source)
+{
+	return unpackRGBE(texelFetch(TEX_PT_COLOR_SPEC, source, 0).x) / STORAGE_SCALE_SPEC;
+}
+
+void main()
+{
+	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+	ivec2 frame_size = ivec2(global_ubo.width, global_ubo.height);
+    ivec2 confidence_size = imageSize(IMG_NRD_SPEC_CONFIDENCE);
+    if (any(greaterThanEqual(pixel, confidence_size))) return;
+    float confidence = 1.0;
+    if (global_ubo.flt_nrd_spec_confidence >= 0.5) {
+        // NRD samples confidence with normalized previous-screen UVs, without
+        // applying gResolutionScale. Populate the entire allocated texture.
+        vec2 smallSize = vec2((frame_size + 4) / 5);
+        vec2 uv = (vec2(pixel) + 0.5) / vec2(confidence_size);
+        vec2 tc = clamp(uv * smallSize, vec2(0.5), smallSize - 0.5)
+            / vec2(textureSize(TEX_NRD_CONFIDENCE_GRADIENT_1, 0));
+        confidence = textureLod(TEX_NRD_CONFIDENCE_GRADIENT_1, tc, 0).x;
+        if (nrd_specular_mode() == 1) confidence *= confidence;
+        if (global_ubo.nrd_history_valid == 0) confidence = 0.0;
+    }
+    imageStore(IMG_NRD_SPEC_CONFIDENCE, pixel, vec4(clamp(confidence, 0.0, 1.0)));
+    imageStore(IMG_NRD_DIFF_CONFIDENCE, pixel, vec4(1.0));
+
+	if (any(greaterThanEqual(pixel, frame_size)))
+		return;
+
+	ivec2 source = checkerboard_source(pixel);
+	vec2 metal_rough = texelFetch(TEX_PT_METALLIC_A, source, 0).xy;
+	vec3 normal = decode_normal(texelFetch(TEX_PT_NORMAL_A, source, 0).x);
+	float view_z = nrd_view_z(pixel, frame_size, texelFetch(TEX_PT_VIEW_DEPTH_A, source, 0).x);
+	// Direct lighting clears all components every frame; indirect tracing
+	// writes only the sampled lobe. NRD reconstructs zero-distance holes.
+	vec3 hit_distances = texelFetch(TEX_PT_NRD_HITDIST, source, 0).xyz;
+	float indirect_hit_distance = hit_distances.y;
+	float specular_hit_distance = hit_distances.z;
+
+	imageStore(IMG_NRD_MV, pixel, vec4(texelFetch(TEX_PT_MOTION, source, 0).rg, 0.0, 0.0));
+	imageStore(IMG_NRD_VIEWZ, pixel, vec4(view_z, 0.0, 0.0, 0.0));
+	vec3 nrd_normal = normal / max(max(abs(normal.x), abs(normal.y)), abs(normal.z));
+	imageStore(IMG_NRD_NORMAL_ROUGHNESS, pixel, vec4(nrd_normal, metal_rough.y));
+	float direct_hit_distance = hit_distances.x;
+	direct_hit_distance = (isnan(direct_hit_distance) || isinf(direct_hit_distance))
+		? 0.0 : max(direct_hit_distance, 0.0);
+	vec4 direct_diffuse_input = vec4(
+		nrd_linear_to_ycocg(max(load_direct_diffuse(source), vec3(0.0))),
+		clamp(direct_hit_distance / reblur_hit_distance_normalization(view_z, 1.0), 0.0, 1.0));
+	// RELAX tracks second moments in fp16, so keep both the raw nonnegative
+	// hit distance and its square inside the safe range used by the frontend.
+    vec3 indirect_diffuse = load_indirect_diffuse(source);
+    if (any(isnan(indirect_diffuse)) || any(isinf(indirect_diffuse)))
+        indirect_diffuse = vec3(0.0);
+    if (isnan(indirect_hit_distance) || isinf(indirect_hit_distance))
+        indirect_hit_distance = 0.0;
+	vec4 indirect_diffuse_input = vec4(
+		min(max(indirect_diffuse, vec3(0.0)), vec3(250.0)),
+		max(indirect_hit_distance, 0.0));
+
+	// The two denoiser families disagree on the specular encoding:
+	// REBLUR_FrontEnd_PackRadianceAndNormHitDist stores YCoCg radiance with a
+	// normalized [0,1] hit distance, while RELAX_FrontEnd_PackRadianceAndHitDist
+	// stores linear radiance with the raw hit distance.  RELAX also tracks second
+	// moments, so the input has to stay well inside the fp16 range once squared.
+	vec3 base = texelFetch(TEX_PT_BASE_COLOR_A, source, 0).rgb;
+    vec3 albedo, f0;
+    get_reflectivity(base, metal_rough.x, albedo, f0);
+    vec3 V = -texelFetch(TEX_PT_VIEW_DIRECTION, source, 0).xyz;
+    vec3 specular = max(load_specular(source), vec3(0.0)) * max(f0, vec3(0.01))
+        / nrd_specular_factor(normal, V, f0, metal_rough.y);
+    if (any(isnan(specular)) || any(isinf(specular))) specular = vec3(0.0);
+    // A uniform rescale retains chromaticity and the directional moment.
+    specular *= min(1.0, 250.0 / max(max(specular.x, specular.y), max(specular.z, 1e-6)));
+    if (isnan(specular_hit_distance) || isinf(specular_hit_distance)) specular_hit_distance = 0.0;
+	vec4 specular_input;
+	const int specular_mode = nrd_specular_mode(); // 0 = REBLUR, 1 = RELAX
+	if (specular_mode == 1)
+		specular_input = vec4(min(specular, vec3(250.0)), max(specular_hit_distance, 0.0));
+	else
+		specular_input = vec4(nrd_linear_to_ycocg(specular),
+			clamp(specular_hit_distance / reblur_hit_distance_normalization(view_z, metal_rough.y), 0.0, 1.0));
+    vec4 moment = texelFetch(TEX_PT_SPEC_MOMENT, source, 0);
+    vec3 directionMoment = moment.xyz / max(moment.w, 1e-6);
+    if (any(isnan(directionMoment)) || any(isinf(directionMoment))) directionMoment = vec3(0.0);
+    float weight = specular_mode == 1 ? _NRD_Luminance(specular) : _NRD_LinearToYCoCg(specular).x;
+    vec4 sh1 = vec4(directionMoment * weight, 0.0);
+    imageStore(IMG_NRD_SPEC_SH1_IN, pixel, sh1);
+    imageStore(IMG_NRD_SPEC_SH1_OUT, pixel, sh1);
+
+	imageStore(IMG_NRD_DIRECT_DIFF_RADIANCE_HITDIST_IN, pixel, direct_diffuse_input);
+	imageStore(IMG_NRD_INDIRECT_DIFF_RADIANCE_HITDIST_IN, pixel, indirect_diffuse_input);
+	imageStore(IMG_NRD_SPEC_RADIANCE_HITDIST_IN, pixel, specular_input);
+	// The NRD bridge can replace these with denoised results; identity output
+	// keeps the path valid when the optional SDK has no active denoiser pass.
+	// Debug-only coverage marker: REBLUR writes a nonnegative normalized
+    // hit distance in alpha. Equality of input/output radiance is inconclusive.
+    vec4 direct_diffuse_output = direct_diffuse_input;
+    if (global_ubo.flt_nrd_debug >= 6.5 && global_ubo.flt_nrd_debug < 7.5)
+        direct_diffuse_output.w = -1.0;
+    imageStore(IMG_NRD_DIRECT_DIFF_RADIANCE_HITDIST_OUT, pixel, direct_diffuse_output);
+	imageStore(IMG_NRD_INDIRECT_DIFF_RADIANCE_HITDIST_OUT, pixel, indirect_diffuse_input);
+	imageStore(IMG_NRD_SPEC_RADIANCE_HITDIST_OUT, pixel, specular_input);
+}

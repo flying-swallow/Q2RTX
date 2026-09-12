@@ -68,6 +68,15 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 /* see main.c to override default file path. By default it will strip away
  * QVK_MOD_, fix the file ending, and convert to lower case */
+#ifdef CONFIG_VKPT_NRD
+#define LIST_SHADER_MODULES_NRD \
+	SHADER_MODULE_DO(QVK_MOD_NRD_CONFIDENCE_FILTER_COMP)             \
+	SHADER_MODULE_DO(QVK_MOD_NRD_PREPARE_COMP)                       \
+	SHADER_MODULE_DO(QVK_MOD_NRD_COMPOSITE_COMP)
+#else
+#define LIST_SHADER_MODULES_NRD
+#endif
+
 #define LIST_SHADER_MODULES \
 	SHADER_MODULE_DO(QVK_MOD_STRETCH_PIC_VERT)                       \
 	SHADER_MODULE_DO(QVK_MOD_STRETCH_PIC_FRAG)                       \
@@ -75,12 +84,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 	SHADER_MODULE_DO(QVK_MOD_FINAL_BLIT_VERT)                        \
 	SHADER_MODULE_DO(QVK_MOD_INSTANCE_GEOMETRY_COMP)                 \
 	SHADER_MODULE_DO(QVK_MOD_ANIMATE_MATERIALS_COMP)                 \
-	SHADER_MODULE_DO(QVK_MOD_ASVGF_GRADIENT_IMG_COMP)                \
-	SHADER_MODULE_DO(QVK_MOD_ASVGF_GRADIENT_ATROUS_COMP)             \
-	SHADER_MODULE_DO(QVK_MOD_ASVGF_GRADIENT_REPROJECT_COMP)          \
-	SHADER_MODULE_DO(QVK_MOD_ASVGF_ATROUS_COMP)                      \
-	SHADER_MODULE_DO(QVK_MOD_ASVGF_LF_COMP)                          \
-	SHADER_MODULE_DO(QVK_MOD_ASVGF_TEMPORAL_COMP)                    \
 	SHADER_MODULE_DO(QVK_MOD_ASVGF_TAAU_COMP)                        \
 	SHADER_MODULE_DO(QVK_MOD_BLOOM_BLUR_COMP)                        \
 	SHADER_MODULE_DO(QVK_MOD_BLOOM_COMPOSITE_COMP)                   \
@@ -96,18 +99,16 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 	SHADER_MODULE_DO(QVK_MOD_GOD_RAYS_FILTER_COMP)                   \
 	SHADER_MODULE_DO(QVK_MOD_SHADOW_MAP_VERT)                        \
 	SHADER_MODULE_DO(QVK_MOD_COMPOSITING_COMP)                       \
-	SHADER_MODULE_DO(QVK_MOD_FSR_EASU_FP16_COMP)                     \
-	SHADER_MODULE_DO(QVK_MOD_FSR_EASU_FP32_COMP)                     \
-	SHADER_MODULE_DO(QVK_MOD_FSR_RCAS_FP16_COMP)                     \
-	SHADER_MODULE_DO(QVK_MOD_FSR_RCAS_FP32_COMP)                     \
 	SHADER_MODULE_DO(QVK_MOD_NORMALIZE_NORMAL_MAP_COMP)              \
 	SHADER_MODULE_DO(QVK_MOD_DEBUG_LINE_FRAG)                        \
 	SHADER_MODULE_DO(QVK_MOD_DEBUG_LINE_VERT)                        \
+	LIST_SHADER_MODULES_NRD
 
 #define LIST_RT_RGEN_SHADER_MODULES \
 	SHADER_MODULE_DO(QVK_MOD_PRIMARY_RAYS_RGEN)                      \
 	SHADER_MODULE_DO(QVK_MOD_REFLECT_REFRACT_RGEN)                   \
 	SHADER_MODULE_DO(QVK_MOD_DIRECT_LIGHTING_RGEN)                   \
+	SHADER_MODULE_DO(QVK_MOD_NRD_CONFIDENCE_RGEN)                   \
 	SHADER_MODULE_DO(QVK_MOD_INDIRECT_LIGHTING_RGEN)                 \
 
 #define LIST_RT_PIPELINE_SHADER_MODULES \
@@ -207,6 +208,11 @@ typedef struct QVK_s {
 	bool                        supports_colorspace;
 	bool                        supports_debug_lines;
 	bool                        supports_smooth_lines;
+	bool                        supports_nrd_device_extensions;
+
+	// Device extensions enabled on qvk.device, for libraries that adopt it.
+	const char* const*          enabled_device_extensions;
+	uint32_t                    num_enabled_device_extensions;
 
 	cmd_buf_group_t             cmd_buffers_graphics;
 	cmd_buf_group_t             cmd_buffers_transfer;
@@ -477,23 +483,21 @@ void create_orthographic_matrix(mat4_t matrix, float xmin, float xmax,
 	PROFILER_DO(PRIMARY_RAYS,               1) \
 	PROFILER_DO(REFLECT_REFRACT_1,          1) \
 	PROFILER_DO(REFLECT_REFRACT_2,          1) \
-	PROFILER_DO(ASVGF_GRADIENT_REPROJECT,   1) \
 	PROFILER_DO(DIRECT_LIGHTING,            1) \
 	PROFILER_DO(INDIRECT_LIGHTING,          1) \
 	PROFILER_DO(INDIRECT_LIGHTING_0,        2) \
 	PROFILER_DO(INDIRECT_LIGHTING_1,        2) \
-	PROFILER_DO(ASVGF_FULL,                 1) \
-	PROFILER_DO(ASVGF_RECONSTRUCT_GRADIENT, 2) \
-	PROFILER_DO(ASVGF_TEMPORAL,             2) \
-	PROFILER_DO(ASVGF_ATROUS,               2) \
+	PROFILER_DO(NRD_CONFIDENCE_TRACE,       1) \
+	PROFILER_DO(NRD_CONFIDENCE_FILTER,      1) \
+	PROFILER_DO(NRD_PREPARE,                1) \
+	PROFILER_DO(NRD_DENOISE,                1) \
+	PROFILER_DO(NRD_COMPOSITE,              1) \
 	PROFILER_DO(MGPU_TRANSFERS,             1) \
 	PROFILER_DO(INTERLEAVE,                 1) \
 	PROFILER_DO(ASVGF_TAA,                  2) \
 	PROFILER_DO(BLOOM,                      1) \
 	PROFILER_DO(TONE_MAPPING,               1) \
 	PROFILER_DO(FSR,                        1) \
-	PROFILER_DO(FSR_EASU,                   2) \
-	PROFILER_DO(FSR_RCAS,                   2) \
 	PROFILER_DO(UPDATE_ENVIRONMENT,         1) \
 	PROFILER_DO(GOD_RAYS,                   1) \
 	PROFILER_DO(GOD_RAYS_REFLECT_REFRACT,   1) \
@@ -583,7 +587,13 @@ void vkpt_submit_command_buffer_simple(
 #define ALL_GPUS (-1)
 void set_current_gpu(VkCommandBuffer cmd_buf, int gpu_index);
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 VkResult allocate_gpu_memory(VkMemoryRequirements mem_req, VkDeviceMemory* pMemory);
+#ifdef __cplusplus
+}
+#endif
 
 #ifdef VKPT_DEVICE_GROUPS
 void vkpt_mgpu_global_barrier(VkCommandBuffer cmd_buf);
@@ -664,6 +674,39 @@ VkResult vkpt_destroy_images(void);
 // Destroy resources associated with a "lazy" image
 VkResult vkpt_destroy_lazy_image(vkpt_lazy_image_t *lazy_image);
 
+#ifdef CONFIG_VKPT_NRD
+#ifdef __cplusplus
+// These are defined in nrd_integration.cpp and called from C.
+extern "C" {
+#endif
+VkResult vkpt_nrd_initialize(void);
+VkResult vkpt_nrd_recreate(void);
+VkResult vkpt_nrd_destroy(void);
+VkResult vkpt_nrd_denoise(VkCommandBuffer cmd_buf, float frame_time, bool reset_history);
+bool vkpt_nrd_available(void);
+bool vkpt_nrd_history_valid(void);
+const char *vkpt_nrd_get_error(void);
+#ifdef __cplusplus
+}
+#endif
+VkResult vkpt_nrd_pipeline_initialize(void);
+VkResult vkpt_nrd_pipeline_destroy(void);
+VkResult vkpt_nrd_create_pipelines(void);
+VkResult vkpt_nrd_destroy_pipelines(void);
+VkResult vkpt_pt_trace_nrd_confidence(VkCommandBuffer cmd_buf);
+VkResult vkpt_nrd_filter_confidence(VkCommandBuffer cmd_buf);
+VkResult vkpt_nrd_prepare(VkCommandBuffer cmd_buf);
+VkResult vkpt_nrd_composite(VkCommandBuffer cmd_buf);
+#else
+static inline VkResult vkpt_nrd_initialize(void) { return VK_SUCCESS; }
+static inline VkResult vkpt_nrd_recreate(void) { return VK_SUCCESS; }
+static inline VkResult vkpt_nrd_destroy(void) { return VK_SUCCESS; }
+static inline VkResult vkpt_nrd_denoise(VkCommandBuffer, float, bool) { return VK_SUCCESS; }
+static inline bool vkpt_nrd_available(void) { return false; }
+static inline bool vkpt_nrd_history_valid(void) { return false; }
+static inline const char *vkpt_nrd_get_error(void) { return "NRD support is not enabled"; }
+#endif
+
 VkResult vkpt_pt_init(void);
 VkResult vkpt_pt_destroy(void);
 VkResult vkpt_pt_create_pipelines(void);
@@ -683,22 +726,25 @@ VkResult vkpt_asvgf_initialize(void);
 VkResult vkpt_asvgf_destroy(void);
 VkResult vkpt_asvgf_create_pipelines(void);
 VkResult vkpt_asvgf_destroy_pipelines(void);
-VkResult vkpt_asvgf_filter(VkCommandBuffer cmd_buf, bool enable_lf);
 VkResult vkpt_compositing(VkCommandBuffer cmd_buf);
 VkResult vkpt_interleave(VkCommandBuffer cmd_buf);
 VkResult vkpt_taa(VkCommandBuffer cmd_buf);
-VkResult vkpt_asvgf_gradient_reproject(VkCommandBuffer cmd_buf);
 
-void vkpt_fsr_init_cvars(void);
-VkResult vkpt_fsr_initialize(void);
-VkResult vkpt_fsr_destroy(void);
-VkResult vkpt_fsr_create_pipelines(void);
-VkResult vkpt_fsr_destroy_pipelines(void);
-bool vkpt_fsr_is_enabled(void);
-bool vkpt_fsr_needs_upscale(void);
-void vkpt_fsr_update_ubo(QVKUniformBuffer_t *ubo);
-VkResult vkpt_fsr_do(VkCommandBuffer cmd_buf);
-VkResult vkpt_fsr_final_blit(VkCommandBuffer cmd_buf, bool warp);
+/* FSR3 is owned by the FSR3 module.  It is deliberately exposed as a
+ * renderer-facing upscaler contract so the frame graph does not know about
+ * FidelityFX context or resource details.  The jitter call must return the
+ * current FSR3 phase/offset for the active render/display extents.  Dispatch
+ * must adapt renderer images, record FSR3 into cmd_buf, and write the result
+ * to VKPT_IMG_TAA_OUTPUT before bloom and tone mapping. */
+void vkpt_fsr3_init_cvars(void);
+VkResult vkpt_fsr3_initialize(void);
+VkResult vkpt_fsr3_recreate(void);
+VkResult vkpt_fsr3_destroy(void);
+bool vkpt_fsr3_is_enabled(void);
+bool vkpt_fsr3_is_requested(void);
+bool vkpt_fsr3_get_jitter(float *x, float *y);
+void vkpt_fsr3_reset(void);
+VkResult vkpt_fsr3_dispatch(VkCommandBuffer cmd_buf, float frame_time, bool reset);
 
 VkResult vkpt_bloom_initialize(void);
 VkResult vkpt_bloom_destroy(void);
@@ -895,4 +941,3 @@ VkResult vkpt_debugdraw_destroy(void);
 VkResult vkpt_debugdraw_destroy_pipelines(void);
 
 #endif  /*__VKPT_H__*/
-

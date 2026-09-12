@@ -22,6 +22,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #include <vulkan/vulkan.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 char * sgets(char * str, int num, char const ** input);
 
 #ifdef VKPT_DEVICE_GROUPS
@@ -45,7 +49,6 @@ buffer_create(
 		VkBufferUsageFlags usage,
 		VkMemoryPropertyFlags mem_properties);
 VkResult buffer_destroy(BufferResource_t *buf);
-void buffer_unmap(BufferResource_t *buf);
 void *buffer_map(BufferResource_t *buf);
 void buffer_unmap(BufferResource_t *buf);
 
@@ -143,6 +146,10 @@ static inline size_t align(size_t x, size_t alignment)
 
 #ifdef VKPT_IMAGE_DUMPS
 void save_to_pfm_file(char* prefix, uint64_t frame_counter, uint64_t width, uint64_t height, char* data, uint64_t rowPitch, int32_t type);
+#endif
+
+#ifdef __cplusplus
+}
 #endif
 
 #endif  /*__VK_UTIL_H__*/

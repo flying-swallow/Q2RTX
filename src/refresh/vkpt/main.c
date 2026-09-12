@@ -119,6 +119,7 @@ UBO_CVAR_LIST
 static bsp_t *bsp_world_model;
 
 static bool temporal_frame_valid = false;
+static bool fsr3_failed = false;
 
 static int world_anim_frame = 0;
 
@@ -158,6 +159,12 @@ VkptInit_t vkpt_initialization[] = {
 	{ "shadowmap", 	vkpt_shadow_map_initialize,        vkpt_shadow_map_destroy,              VKPT_INIT_DEFAULT,            0 },
 	{ "shadowmap|", vkpt_shadow_map_create_pipelines,  vkpt_shadow_map_destroy_pipelines,    VKPT_INIT_RELOAD_SHADER ,     0 },
 	{ "images",   vkpt_create_images,                  vkpt_destroy_images,                  VKPT_INIT_SWAPCHAIN_RECREATE, 0 },
+	{ "fsr3",     vkpt_fsr3_initialize,                vkpt_fsr3_destroy,                     VKPT_INIT_SWAPCHAIN_RECREATE, 0 },
+#ifdef CONFIG_VKPT_NRD
+	{ "nrd",      vkpt_nrd_initialize,                 vkpt_nrd_destroy,                     VKPT_INIT_SWAPCHAIN_RECREATE, 0 },
+	{ "nrd|",     vkpt_nrd_pipeline_initialize,        vkpt_nrd_pipeline_destroy,             VKPT_INIT_SWAPCHAIN_RECREATE, 0 },
+	{ "nrd||",    vkpt_nrd_create_pipelines,           vkpt_nrd_destroy_pipelines,             VKPT_INIT_RELOAD_SHADER | VKPT_INIT_SWAPCHAIN_RECREATE,      0 },
+#endif
 	{ "draw",     vkpt_draw_initialize,                vkpt_draw_destroy,                    VKPT_INIT_DEFAULT,            0 },
 	{ "pt",       vkpt_pt_init,                        vkpt_pt_destroy,                      VKPT_INIT_DEFAULT,            0 },
 	{ "pt|",      vkpt_pt_create_pipelines,            vkpt_pt_destroy_pipelines,            VKPT_INIT_RELOAD_SHADER,      0 },
@@ -167,14 +174,12 @@ VkptInit_t vkpt_initialization[] = {
 	{ "debug|",   vkpt_debugdraw_create_pipelines,     vkpt_debugdraw_destroy_pipelines,     VKPT_INIT_SWAPCHAIN_RECREATE
 																						   | VKPT_INIT_RELOAD_SHADER,      0 },
 	{ "vbo|",     vkpt_vertex_buffer_create_pipelines, vkpt_vertex_buffer_destroy_pipelines, VKPT_INIT_RELOAD_SHADER,      0 },
-	{ "asvgf",    vkpt_asvgf_initialize,               vkpt_asvgf_destroy,                   VKPT_INIT_DEFAULT,            0 },
-	{ "asvgf|",   vkpt_asvgf_create_pipelines,         vkpt_asvgf_destroy_pipelines,         VKPT_INIT_RELOAD_SHADER,      0 },
+	{ "postprocess", vkpt_asvgf_initialize,            vkpt_asvgf_destroy,                   VKPT_INIT_DEFAULT,            0 },
+	{ "postprocess|", vkpt_asvgf_create_pipelines,      vkpt_asvgf_destroy_pipelines,         VKPT_INIT_RELOAD_SHADER,      0 },
 	{ "bloom",    vkpt_bloom_initialize,               vkpt_bloom_destroy,                   VKPT_INIT_DEFAULT,            0 },
 	{ "bloom|",   vkpt_bloom_create_pipelines,         vkpt_bloom_destroy_pipelines,         VKPT_INIT_RELOAD_SHADER,      0 },
 	{ "tonemap",  vkpt_tone_mapping_initialize,        vkpt_tone_mapping_destroy,            VKPT_INIT_DEFAULT,            0 },
 	{ "tonemap|", vkpt_tone_mapping_create_pipelines,  vkpt_tone_mapping_destroy_pipelines,  VKPT_INIT_RELOAD_SHADER,      0 },
-	{ "fsr",      vkpt_fsr_initialize,                 vkpt_fsr_destroy,                     VKPT_INIT_DEFAULT,            0 },
-	{ "fsr|",     vkpt_fsr_create_pipelines,           vkpt_fsr_destroy_pipelines,           VKPT_INIT_RELOAD_SHADER,      0 },
 
 	{ "physicalSky", vkpt_physical_sky_initialize,         vkpt_physical_sky_destroy,            VKPT_INIT_DEFAULT,        0 },
 	{ "physicalSky|", vkpt_physical_sky_create_pipelines,  vkpt_physical_sky_destroy_pipelines,  VKPT_INIT_RELOAD_SHADER,  0 },
@@ -265,7 +270,7 @@ static VkExtent2D get_screen_image_extent(void)
 		int image_scale = max(cvar_drs_minscale->integer, cvar_drs_maxscale->integer);
 
 		// In case FSR enable we'll always upscale to 100% and thus need at least the unscaled extent
-		if(vkpt_fsr_is_enabled())
+		if(vkpt_fsr3_is_requested())
 			image_scale = max(image_scale, 100);
 
 		result.width = (uint32_t)(qvk.extent_unscaled.width * (float)image_scale / 100.f);
@@ -285,6 +290,8 @@ static VkExtent2D get_screen_image_extent(void)
 void vkpt_reset_accumulation()
 {
 	num_accumulated_frames = 0;
+	temporal_frame_valid = false;
+	fsr3_failed = false;
 }
 
 VkResult
@@ -464,10 +471,23 @@ static const char *optional_instance_extension_name[NUM_OPTIONAL_INSTANCE_EXTENS
 #undef VK_OPT_EXT_DO
 };
 
+#ifdef CONFIG_VKPT_NRD
+/* NRD is wrapped through NRI, which refuses to adopt a device without
+ * synchronization2 and pushes immutable samplers through push descriptors.
+ * If either extension is unavailable, the renderer uses unfiltered
+ * compositing for that frame. */
+#define OPTIONAL_DEVICE_EXTENSIONS_NRD				\
+	VK_OPT_EXT_DO(VK_KHR_SYNCHRONIZATION_2)			\
+	VK_OPT_EXT_DO(VK_KHR_PUSH_DESCRIPTOR)
+#else
+#define OPTIONAL_DEVICE_EXTENSIONS_NRD
+#endif
+
 #define OPTIONAL_DEVICE_EXTENSIONS					\
 	VK_OPT_EXT_DO(VK_KHR_LINE_RASTERIZATION)		\
 	VK_OPT_EXT_DO(VK_KHR_SHADER_NON_SEMANTIC_INFO)	\
-	VK_OPT_EXT_DO(VK_EXT_DEBUG_MARKER)
+	VK_OPT_EXT_DO(VK_EXT_DEBUG_MARKER)				\
+	OPTIONAL_DEVICE_EXTENSIONS_NRD
 
 enum optional_device_extension_id
 {
@@ -1233,6 +1253,12 @@ init_vulkan(void)
 	VkPhysicalDevice16BitStorageFeatures features_16bit_storage = {
 		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES,
 	};
+#ifdef CONFIG_VKPT_NRD
+	bool nrd_shader_features = false;
+	VkPhysicalDeviceSynchronization2FeaturesKHR sync2_features = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR,
+	};
+#endif
 	{
 		VkPhysicalDeviceVulkan12Features device_features_1_2 = {
 			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
@@ -1249,8 +1275,19 @@ init_vulkan(void)
 			device_features_lines.pNext = device_features.pNext;
 			device_features.pNext = &device_features_lines;
 		}
+	#ifdef CONFIG_VKPT_NRD
+		if (available_optional_device_extensions[OPT_EXT_VK_KHR_SYNCHRONIZATION_2]) {
+			sync2_features.pNext = device_features.pNext;
+			device_features.pNext = &sync2_features;
+		}
+	#endif
 		vkGetPhysicalDeviceFeatures2(qvk.physical_device, &device_features);
-		qvk.supports_fp16 = device_features_1_2.shaderFloat16 && features_16bit_storage.storageBuffer16BitAccess;
+		#ifdef CONFIG_VKPT_NRD
+        nrd_shader_features = device_features_1_2.descriptorBindingPartiallyBound
+            && device_features.features.shaderStorageImageWriteWithoutFormat
+            && device_features.features.shaderStorageImageReadWithoutFormat;
+#endif
+        qvk.supports_fp16 = device_features_1_2.shaderFloat16 && features_16bit_storage.storageBuffer16BitAccess;
 		qvk.supports_debug_lines = device_features.features.fillModeNonSolid && device_features.features.wideLines;
 		qvk.supports_smooth_lines = qvk.supports_debug_lines && device_features_lines.smoothLines;
 	}
@@ -1465,6 +1502,34 @@ init_vulkan(void)
 		line_rast_feat.pNext = device_features.pNext;
 		device_features.pNext = &line_rast_feat;
 	}
+
+#ifdef CONFIG_VKPT_NRD
+	VkPhysicalDeviceSynchronization2FeaturesKHR sync2_feat = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR,
+		.synchronization2 = VK_TRUE,
+	};
+	qvk.supports_nrd_device_extensions = available_optional_device_extensions[OPT_EXT_VK_KHR_SYNCHRONIZATION_2]
+		&& sync2_features.synchronization2 && nrd_shader_features
+		&& available_optional_device_extensions[OPT_EXT_VK_KHR_PUSH_DESCRIPTOR];
+	if (qvk.supports_nrd_device_extensions) {
+        // NRI's descriptors and NRD's formatless UAV shaders require these
+        // features on an adopted Vulkan 1.2 device; support alone is insufficient.
+        device_features_vk12.descriptorBindingPartiallyBound = VK_TRUE;
+        device_features.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+        device_features.features.shaderStorageImageReadWithoutFormat = VK_TRUE;
+		sync2_feat.synchronization2 = VK_TRUE;
+		sync2_feat.pNext = device_features.pNext;
+		device_features.pNext = &sync2_feat;
+	}
+#endif
+
+	/* Extension name pointers come from the Vulkan headers, so keeping the list
+	 * around after this stack frame is safe. NRI needs it to adopt the device. */
+	static const char *enabled_device_extensions[64];
+	uint32_t num_enabled_device_extensions = min(device_extension_count, LENGTH(enabled_device_extensions));
+	memcpy(enabled_device_extensions, device_extensions, sizeof(const char *) * num_enabled_device_extensions);
+	qvk.enabled_device_extensions = enabled_device_extensions;
+	qvk.num_enabled_device_extensions = num_enabled_device_extensions;
 
 	/* create device and queue */
 	result = vkCreateDevice(qvk.physical_device, &dev_create_info, NULL, &qvk.device);
@@ -2523,10 +2588,48 @@ typedef struct reference_mode_s
 {
 	bool enable_accumulation;
 	bool enable_denoiser;
+	int denoiser_backend;
 	float num_bounce_rays;
 	float temporal_blend_factor;
 	int reflect_refract;
 } reference_mode_t;
+
+enum {
+	DENOISER_DISABLED,
+	DENOISER_NRD
+};
+
+static int previous_denoiser_backend = DENOISER_DISABLED;
+/* NRD's temporal inputs include the first-bounce hit distance only for the
+ * full-resolution lighting modes.  Keep the effective mode here so changes
+ * between modes with and without that input cannot reuse incompatible history. */
+static float previous_num_bounce_rays = -1.f;
+#ifdef CONFIG_VKPT_NRD
+/* The NRD instance is created with a fixed set of denoisers, so switching the
+ * specular denoiser has to recreate it between frames. */
+static bool nrd_denoisers_changed = false;
+#endif
+
+static bool
+fsr3_frame_active(const reference_mode_t* ref_mode)
+{
+	return !fsr3_failed && ref_mode->enable_denoiser && !ref_mode->enable_accumulation &&
+		vkpt_fsr3_is_enabled() && qvk.device_count == 1 && !qvk.frame_menu_mode &&
+		cvar_pt_projection->integer == PROJECTION_RECTILINEAR &&
+		qvk.extent_render.width < qvk.extent_unscaled.width &&
+		qvk.extent_render.height < qvk.extent_unscaled.height;
+}
+
+static int
+evaluate_denoiser_backend(bool enable_denoiser)
+{
+	#ifdef CONFIG_VKPT_NRD
+	if (enable_denoiser && qvk.device_count == 1 &&
+		cvar_pt_projection->integer == PROJECTION_RECTILINEAR && vkpt_nrd_available())
+		return DENOISER_NRD;
+	#endif
+	return DENOISER_DISABLED;
+}
 
 static int
 get_accumulation_rendering_framenum(void)
@@ -2619,6 +2722,20 @@ evaluate_reference_mode(reference_mode_t* ref_mode)
 	}
 
 	ref_mode->reflect_refract = min(10, ref_mode->reflect_refract);
+	ref_mode->denoiser_backend = evaluate_denoiser_backend(ref_mode->enable_denoiser);
+	if (ref_mode->denoiser_backend != previous_denoiser_backend)
+	{
+		/* NRD and the unfiltered path do not share temporal history. */
+		temporal_frame_valid = false;
+		previous_denoiser_backend = ref_mode->denoiser_backend;
+	}
+	if (ref_mode->num_bounce_rays != previous_num_bounce_rays)
+	{
+		/* The lighting signal and NRD's availability of indirect hit distance
+		 * change with this mode. */
+		temporal_frame_valid = false;
+		previous_num_bounce_rays = ref_mode->num_bounce_rays;
+	}
 }
 
 static void
@@ -2630,14 +2747,19 @@ evaluate_taa_settings(const reference_mode_t* ref_mode)
 	if (!ref_mode->enable_denoiser)
 		return;
 
+	bool fsr3_enabled = fsr3_frame_active(ref_mode);
 	int flt_taa = cvar_flt_taa->integer;
-	// FSR RCAS needs upscaled input; if EASU was disabled, force to TAAU
-	bool force_upscaling = vkpt_fsr_is_enabled() && vkpt_fsr_needs_upscale();
-	if(force_upscaling)
-	{
-		flt_taa = AA_MODE_UPSCALE;
-	}
 
+	/* FSR3 owns temporal upscaling.  It is only valid for a single-GPU,
+	 * denoised, sub-display render and must not be combined with TAAU. */
+	if (fsr3_enabled)
+	{
+		/* FSR3 consumes the interleaved render-resolution color and owns the
+		 * upscale. TAA_OUTPUT is its presentation-resolution destination. */
+		qvk.effective_aa_mode = AA_MODE_OFF;
+		qvk.extent_taa_output = qvk.extent_unscaled;
+		return;
+	}
 	if (flt_taa == AA_MODE_TAA)
 	{
 		qvk.effective_aa_mode = AA_MODE_TAA;
@@ -2650,9 +2772,10 @@ evaluate_taa_settings(const reference_mode_t* ref_mode)
 		}
 		else
 		{
+			/* TAAU produces the display-resolution image itself; FSR3 frames
+			 * returned above, so nothing else upscales after this pass. */
 			qvk.effective_aa_mode = AA_MODE_UPSCALE;
-			if (!vkpt_fsr_is_enabled() || force_upscaling)
-				qvk.extent_taa_output = qvk.extent_unscaled;
+			qvk.extent_taa_output = qvk.extent_unscaled;
 		}
 	}
 }
@@ -2830,7 +2953,7 @@ prepare_ubo(refdef_t *fd, mleaf_t* viewleaf, const reference_mode_t* ref_mode, c
 	UBO_CVAR_LIST
 #undef UBO_CVAR_DO
 
-	bool fsr_enabled = vkpt_fsr_is_enabled();
+	bool fsr3_enabled = fsr3_frame_active(ref_mode);
 
 	if (!ref_mode->enable_denoiser)
 	{
@@ -2852,7 +2975,7 @@ prepare_ubo(refdef_t *fd, mleaf_t* viewleaf, const reference_mode_t* ref_mode, c
 			ubo->pt_ndf_trim = 1.f;
 		}
 	}
-	else if(fsr_enabled || (qvk.effective_aa_mode == AA_MODE_UPSCALE))
+	else if(fsr3_enabled || (qvk.effective_aa_mode == AA_MODE_UPSCALE))
 	{
 		// adjust texture LOD bias to the resolution scale, i.e. use negative bias if scale is < 100
 		float resolution_scale = (drs_effective_scale != 0) ? (float)drs_effective_scale : (float)scr_viewsize->integer;
@@ -2894,6 +3017,8 @@ prepare_ubo(refdef_t *fd, mleaf_t* viewleaf, const reference_mode_t* ref_mode, c
 	ubo->flt_enable = ref_mode->enable_denoiser;
 	ubo->flt_taa = qvk.effective_aa_mode;
 	ubo->pt_num_bounce_rays = ref_mode->num_bounce_rays;
+    ubo->nrd_active = ref_mode->denoiser_backend == DENOISER_NRD;
+    ubo->nrd_history_valid = vkpt_nrd_history_valid() && temporal_frame_valid && ubo->prev_width == ubo->width && ubo->prev_height == ubo->height;
 	ubo->pt_reflect_refract = ref_mode->reflect_refract;
 
 	if (ref_mode->num_bounce_rays < 1.f)
@@ -2925,10 +3050,19 @@ prepare_ubo(refdef_t *fd, mleaf_t* viewleaf, const reference_mode_t* ref_mode, c
 		ubo->sub_pixel_jitter[1] = 0.f;
 	}
 
-	// Set up constants for FSR
-	if (fsr_enabled)
+	ubo->fsr3_enabled = fsr3_enabled ? 1 : 0;
+
+	if (fsr3_enabled)
 	{
-		vkpt_fsr_update_ubo(ubo);
+		float jitter_x = 0.f, jitter_y = 0.f;
+		if (vkpt_fsr3_get_jitter(&jitter_x, &jitter_y))
+		{
+			/* FSR3 un-jitters a sample as (pixel + 0.5 - jitterOffset), while the
+			 * primary rays are traced at (pixel + 0.5 + sub_pixel_jitter).  Negate
+			 * here so the two agree; fsr.c still reports the raw SDK offset. */
+			ubo->sub_pixel_jitter[0] = -jitter_x;
+			ubo->sub_pixel_jitter[1] = -jitter_y;
+		}
 	}
 
 	ubo->first_person_model = cl_player_model->integer == CL_PLAYER_MODEL_FIRST_PERSON;
@@ -2965,6 +3099,19 @@ R_RenderFrame_RTX(refdef_t *fd)
 
 	vkpt_refdef.fd = fd;
 	bool render_world = (fd->rdflags & RDF_NOWORLDMODEL) == 0;
+
+#ifdef CONFIG_VKPT_NRD
+	if (nrd_denoisers_changed)
+	{
+		/* Rebuild the instance before the UBO is filled, so that the shaders and
+		 * NRD agree on the specular encoding within this frame.  The old
+		 * instance owns history resources that may still be in flight. */
+		nrd_denoisers_changed = false;
+		vkDeviceWaitIdle(qvk.device);
+		vkpt_nrd_recreate();
+		temporal_frame_valid = false;
+	}
+#endif
 
 	static float previous_time = -1.f;
 	float frame_time = min(1.f, max(0.f, fd->time - previous_time));
@@ -3019,11 +3166,13 @@ R_RenderFrame_RTX(refdef_t *fd)
 			sun_light.visible = sun_light.visible && sun_visible_prev;
 	}
 
+	qvk.frame_menu_mode = cl_paused->integer == 1 && uis.menuDepth > 0 && render_world;
+
+	/* fsr3_frame_active() reads qvk.frame_menu_mode, so it must be up to date
+	 * before the AA mode is evaluated. */
 	reference_mode_t ref_mode;
 	evaluate_reference_mode(&ref_mode);
 	evaluate_taa_settings(&ref_mode);
-	
-	qvk.frame_menu_mode = cl_paused->integer == 1 && uis.menuDepth > 0 && render_world;
 
 	int new_world_anim_frame = (int)(fd->time * 2);
 	bool update_world_animations = (new_world_anim_frame != world_anim_frame);
@@ -3251,13 +3400,6 @@ R_RenderFrame_RTX(refdef_t *fd)
 			END_PERF_MARKER(trace_cmd_buf, PROFILER_REFLECT_REFRACT_2);
 		}
 
-		if (ref_mode.enable_denoiser)
-		{
-			BEGIN_PERF_MARKER(trace_cmd_buf, PROFILER_ASVGF_GRADIENT_REPROJECT);
-			vkpt_asvgf_gradient_reproject(trace_cmd_buf);
-			END_PERF_MARKER(trace_cmd_buf, PROFILER_ASVGF_GRADIENT_REPROJECT);
-		}
-
 		vkpt_pt_trace_lighting(trace_cmd_buf, ref_mode.num_bounce_rays);
 		
 		vkpt_submit_command_buffer(
@@ -3271,23 +3413,123 @@ R_RenderFrame_RTX(refdef_t *fd)
 		*curr_trace_signaled = true;
 	}
 
+	bool nrd_failed_this_frame = false;
+	bool fsr3_failed_this_frame = false;
+	bool fsr3_enabled = fsr3_frame_active(&ref_mode);
+
+	if (vkpt_refdef.uniform_buffer.flt_nrd_debug >= 0.5f)
+	{
+		/* Diagnostic: report the frame extents whenever any of them change. */
+		static VkExtent2D dbg_render, dbg_screen, dbg_unscaled, dbg_taa_out;
+		static int dbg_aa = -1, dbg_fsr3 = -1, dbg_scale = -1;
+		if (!extents_equal(dbg_render, qvk.extent_render) || !extents_equal(dbg_screen, qvk.extent_screen_images) ||
+			!extents_equal(dbg_unscaled, qvk.extent_unscaled) || !extents_equal(dbg_taa_out, qvk.extent_taa_output) ||
+			dbg_aa != qvk.effective_aa_mode || dbg_fsr3 != (int)fsr3_enabled || dbg_scale != drs_effective_scale)
+		{
+			dbg_render = qvk.extent_render; dbg_screen = qvk.extent_screen_images; dbg_unscaled = qvk.extent_unscaled;
+			dbg_taa_out = qvk.extent_taa_output; dbg_aa = qvk.effective_aa_mode; dbg_fsr3 = fsr3_enabled; dbg_scale = drs_effective_scale;
+			Com_Printf("vkpt extents: render %ux%u screen %ux%u unscaled %ux%u taa_out %ux%u aa_mode %d fsr3_frame %d fsr3_ctx %d drs %d ubo %dx%d\n",
+				qvk.extent_render.width, qvk.extent_render.height,
+				qvk.extent_screen_images.width, qvk.extent_screen_images.height,
+				qvk.extent_unscaled.width, qvk.extent_unscaled.height,
+				qvk.extent_taa_output.width, qvk.extent_taa_output.height,
+				qvk.effective_aa_mode, (int)fsr3_enabled, (int)vkpt_fsr3_is_enabled(), drs_effective_scale,
+				vkpt_refdef.uniform_buffer.width, vkpt_refdef.uniform_buffer.height);
+		}
+	}
 	{
 		VkCommandBuffer post_cmd_buf = vkpt_begin_command_buffer(&qvk.cmd_buffers_graphics);
+		int frame_denoiser_backend = ref_mode.denoiser_backend;
 
-		BEGIN_PERF_MARKER(post_cmd_buf, PROFILER_ASVGF_FULL);
-		if (ref_mode.enable_denoiser)
+		if (frame_denoiser_backend == DENOISER_NRD)
 		{
-			vkpt_asvgf_filter(post_cmd_buf, cvar_pt_num_bounce_rays->value >= 0.5f);
+	#ifdef CONFIG_VKPT_NRD
+			/* Keep NRD's prepare -> denoise -> composite sequence contiguous.
+			 * The composite pass writes back into the checkerboard layout, so the
+			 * interleave pass below still produces FLAT_COLOR, FLAT_MOTION and the
+			 * FSR3 inputs for TAA/upscaling. */
+            if (vkpt_refdef.uniform_buffer.flt_nrd_spec_confidence >= 0.5f) {
+                BEGIN_PERF_MARKER(post_cmd_buf, PROFILER_NRD_CONFIDENCE_TRACE);
+                vkpt_pt_trace_nrd_confidence(post_cmd_buf);
+                END_PERF_MARKER(post_cmd_buf, PROFILER_NRD_CONFIDENCE_TRACE);
+                BEGIN_PERF_MARKER(post_cmd_buf, PROFILER_NRD_CONFIDENCE_FILTER);
+                vkpt_nrd_filter_confidence(post_cmd_buf);
+                END_PERF_MARKER(post_cmd_buf, PROFILER_NRD_CONFIDENCE_FILTER);
+            }
+			BEGIN_PERF_MARKER(post_cmd_buf, PROFILER_NRD_PREPARE);
+			VkResult nrd_result = vkpt_nrd_prepare(post_cmd_buf);
+			END_PERF_MARKER(post_cmd_buf, PROFILER_NRD_PREPARE);
+			if (nrd_result == VK_SUCCESS)
+			{
+				BEGIN_PERF_MARKER(post_cmd_buf, PROFILER_NRD_DENOISE);
+				nrd_result = vkpt_nrd_denoise(post_cmd_buf, frame_time, !temporal_frame_valid);
+				END_PERF_MARKER(post_cmd_buf, PROFILER_NRD_DENOISE);
+			}
+			if (nrd_result == VK_SUCCESS)
+			{
+				BEGIN_PERF_MARKER(post_cmd_buf, PROFILER_NRD_COMPOSITE);
+				nrd_result = vkpt_nrd_composite(post_cmd_buf);
+				END_PERF_MARKER(post_cmd_buf, PROFILER_NRD_COMPOSITE);
+			}
+			if (nrd_result != VK_SUCCESS || !vkpt_nrd_available())
+			{
+				/* Do not use a partially denoised frame as temporal history.  The
+				 * unfiltered compositing path below is safe for this frame. */
+				frame_denoiser_backend = DENOISER_DISABLED;
+				nrd_failed_this_frame = true;
+				temporal_frame_valid = false;
+			}
+		#else
+			/* Keep this path safe if a stale mode reaches a build without the
+			 * NRD bridge: use unfiltered compositing and reset history. */
+			frame_denoiser_backend = DENOISER_DISABLED;
+			nrd_failed_this_frame = true;
+			temporal_frame_valid = false;
+	#endif
 		}
-		else
+
+		if (frame_denoiser_backend == DENOISER_DISABLED)
 		{
+			BEGIN_PERF_MARKER(post_cmd_buf, PROFILER_COMPOSITING);
 			vkpt_compositing(post_cmd_buf);
+			END_PERF_MARKER(post_cmd_buf, PROFILER_COMPOSITING);
 		}
-		END_PERF_MARKER(post_cmd_buf, PROFILER_ASVGF_FULL);
 
 		vkpt_interleave(post_cmd_buf);
 
-		vkpt_taa(post_cmd_buf);
+		if (!fsr3_enabled || nrd_failed_this_frame)
+		{
+			/* The UBO for this frame is already committed to qvk.extent_taa_output,
+			 * so the fallback pass must keep using it.  With flt_taa == AA_MODE_OFF
+			 * the TAA pass degrades to a point resample up to that extent. */
+			vkpt_taa(post_cmd_buf);
+		}
+
+		if (fsr3_enabled && !nrd_failed_this_frame)
+		{
+			BEGIN_PERF_MARKER(post_cmd_buf, PROFILER_FSR);
+			VkResult fsr3_result = vkpt_fsr3_dispatch(post_cmd_buf, frame_time <= 0.f ? frame_wallclock_time : frame_time,
+				!temporal_frame_valid);
+			END_PERF_MARKER(post_cmd_buf, PROFILER_FSR);
+			if (fsr3_result != VK_SUCCESS)
+			{
+				static bool fsr3_failure_reported = false;
+				if (!fsr3_failure_reported)
+				{
+					Com_WPrintf("FSR3: dispatch failed (VkResult %d), falling back to TAA output\n", (int)fsr3_result);
+					fsr3_failure_reported = true;
+				}
+				/* FSR3 failure invalidates its history.  The module must fall back
+				 * to the native TAA output on the next frame. */
+				fsr3_failed_this_frame = true;
+				fsr3_failed = true;
+				temporal_frame_valid = false;
+				/* The failed dispatch must not leave the previous TAA_OUTPUT in use.
+				 * Keep qvk.extent_taa_output at the extent the UBO was uploaded with;
+				 * the TAA pass resamples the render-resolution color up to it. */
+				vkpt_taa(post_cmd_buf);
+			}
+		}
 
 		BEGIN_PERF_MARKER(post_cmd_buf, PROFILER_BLOOM);
 		if (cvar_bloom_enable->integer != 0 || qvk.frame_menu_mode)
@@ -3310,12 +3552,6 @@ R_RenderFrame_RTX(refdef_t *fd)
 		}
 		END_PERF_MARKER(post_cmd_buf, PROFILER_TONE_MAPPING);
 
-		// Skip FSR (upscaling) if image is going to be heavily blurred anyway (menu mode)
-		if(vkpt_fsr_is_enabled() && !qvk.frame_menu_mode)
-		{
-			vkpt_fsr_do(post_cmd_buf);
-		}
-
 		{
 			VkBufferCopy copyRegion = { 0, 0, sizeof(ReadbackBuffer) };
 			vkCmdCopyBuffer(post_cmd_buf, qvk.buf_readback.buffer, qvk.buf_readback_staging[qvk.current_frame_index].buffer, 1, &copyRegion);
@@ -3326,7 +3562,7 @@ R_RenderFrame_RTX(refdef_t *fd)
 		vkpt_submit_command_buffer_simple(post_cmd_buf, qvk.queue_graphics, true);
 	}
 
-	temporal_frame_valid = ref_mode.enable_denoiser;
+	temporal_frame_valid = ref_mode.enable_denoiser && !nrd_failed_this_frame && !fsr3_failed_this_frame;
 	
 	frame_ready = true;
 	drs_last_frame_world = true;
@@ -3341,7 +3577,16 @@ R_RenderFrame_RTX(refdef_t *fd)
 static void temporal_cvar_changed(cvar_t *self)
 {
 	temporal_frame_valid = false;
+	fsr3_failed = false;
 }
+
+#ifdef CONFIG_VKPT_NRD
+static void nrd_denoiser_cvar_changed(cvar_t *self)
+{
+	nrd_denoisers_changed = true;
+	temporal_cvar_changed(self);
+}
+#endif
 
 static void
 recreate_swapchain(void)
@@ -3599,26 +3844,14 @@ R_EndFrame_RTX(void)
 	if (frame_ready)
 	{
 		bool waterwarp = (vkpt_refdef.fd->rdflags & RDF_UNDERWATER) && cvar_pt_waterwarp->integer;
-		if (vkpt_fsr_is_enabled() && !qvk.frame_menu_mode)
-		{
-			vkpt_fsr_final_blit(cmd_buf, waterwarp);
-		}
-		else if (qvk.effective_aa_mode == AA_MODE_UPSCALE)
-		{
-			vkpt_final_blit(cmd_buf, VKPT_IMG_TAA_OUTPUT, qvk.extent_taa_output, false, waterwarp);
-		}
-		else
-		{
-			VkExtent2D extent_unscaled_half;
-			extent_unscaled_half.width = qvk.extent_unscaled.width / 2;
-			extent_unscaled_half.height = qvk.extent_unscaled.height / 2;
-
-			if (extents_equal(qvk.extent_render, qvk.extent_unscaled) ||
-				(extents_equal(qvk.extent_render, extent_unscaled_half) && drs_effective_scale == 0)) // don't do nearest filter 2x upscale with DRS enabled
-				vkpt_final_blit(cmd_buf, VKPT_IMG_TAA_OUTPUT, qvk.extent_taa_output, false, waterwarp);
-			else
-				vkpt_final_blit(cmd_buf, VKPT_IMG_TAA_OUTPUT, qvk.extent_taa_output, true, waterwarp);
-		}
+		/* Filter only when the blit itself rescales (TAAU and FSR3 already
+		 * produce display-resolution output), and keep upstream's exception
+		 * for the exact 2x case without dynamic resolution. */
+		VkExtent2D extent_unscaled_half = { qvk.extent_unscaled.width / 2, qvk.extent_unscaled.height / 2 };
+		bool blit_rescales = !extents_equal(qvk.extent_taa_output, qvk.extent_unscaled);
+		bool exact_half = extents_equal(qvk.extent_taa_output, extent_unscaled_half) && drs_effective_scale == 0;
+		vkpt_final_blit(cmd_buf, VKPT_IMG_TAA_OUTPUT, qvk.extent_taa_output,
+			blit_rescales && !exact_half, waterwarp);
 
 		frame_ready = false;
 	}
@@ -3852,7 +4085,7 @@ R_Init_RTX(bool total)
 	cvar_tm_blend_enable = Cvar_Get("tm_blend_enable", "1", CVAR_ARCHIVE);
 
 	drs_init();
-	vkpt_fsr_init_cvars();
+	vkpt_fsr3_init_cvars();
 
 	// Minimum NVIDIA driver version - this is a cvar in case something changes in the future,
 	// and the current test no longer works.
@@ -3888,6 +4121,18 @@ R_Init_RTX(bool total)
 	cvar_flt_temporal_lf->changed = temporal_cvar_changed;
 	cvar_flt_temporal_spec->changed = temporal_cvar_changed;
 	cvar_flt_enable->changed = temporal_cvar_changed;
+#ifdef CONFIG_VKPT_NRD
+	cvar_flt_nrd_spec_denoiser->flags |= CVAR_ARCHIVE;
+	cvar_flt_nrd_spec_denoiser->changed = nrd_denoiser_cvar_changed;
+    cvar_flt_nrd_spec_sh->flags |= CVAR_ARCHIVE;
+    cvar_flt_nrd_spec_sh->changed = nrd_denoiser_cvar_changed;
+    cvar_t *nrd_settings[] = { cvar_flt_nrd_spec_antilag, cvar_flt_nrd_spec_confidence,
+        cvar_flt_nrd_spec_history_seconds, cvar_flt_nrd_spec_lobe_scale };
+    for (unsigned i = 0; i < LENGTH(nrd_settings); i++) {
+        nrd_settings[i]->flags |= CVAR_ARCHIVE;
+        nrd_settings[i]->changed = temporal_cvar_changed;
+    }
+#endif
 
 	cvar_pt_dof->changed = accumulation_cvar_changed;
 	cvar_pt_aperture->changed = accumulation_cvar_changed;

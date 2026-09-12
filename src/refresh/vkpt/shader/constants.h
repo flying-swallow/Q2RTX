@@ -19,8 +19,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #ifndef  _CONSTANTS_H_
 #define  _CONSTANTS_H_
 
-#define GRAD_DWN (3)
-
 #define SHADOWMAP_SIZE 4096
 
 #define HISTOGRAM_BINS 128
@@ -40,6 +38,17 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 #define MAX_CAMERAS 8
 
+// Q2RTX world coordinates are inches; these conversions are shared by C/C++
+// and GLSL consumers that exchange physical distances.
+#define METERS_PER_WORLD_UNIT           0.0254
+#define WORLD_UNITS_PER_METER            (1.0 / METERS_PER_WORLD_UNIT)
+
+// NRD's A is the SDK's physical 3-meter distance converted to world units;
+// B and C are dimensionless scales per ReblurHitDistanceParameters.
+#define NRD_REBLUR_HIT_DISTANCE_A       (3.0 * WORLD_UNITS_PER_METER)
+#define NRD_REBLUR_HIT_DISTANCE_B       0.1
+#define NRD_REBLUR_HIT_DISTANCE_C       20.0
+
 #define MAX_FOG_VOLUMES 8
 
 #define AA_MODE_OFF 0
@@ -48,7 +57,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 // Scaling factors for lighting components when they are stored in textures.
 // FP16 and RGBE textures have very limited range, and these factors help bring the signal within that range.
-#define STORAGE_SCALE_LF 1024
+// Up to two indirect samples, each clamped to 1000, can accumulate here.
+// 32 keeps even the signed Co/Cg coefficients <= 64000 in FP16. 1024
+// overflows bright samples before reconstruction/NRD can clamp radiance.
+#define STORAGE_SCALE_LF 32
 #define STORAGE_SCALE_HF 32
 #define STORAGE_SCALE_SPEC 32
 #define STORAGE_SCALE_HDR 128

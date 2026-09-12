@@ -87,6 +87,7 @@ right before this shader is invoked, see function `vkpt_interleave`.
 #include "global_textures.h"
 
 #include "utils.glsl"
+#include "projection.glsl"
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
@@ -118,7 +119,7 @@ ivec2 get_input_position(out int other_side_offset)
 
 vec4 safe_load(ivec2 pos)
 {
-    if(pos.x >= global_ubo.width || pos.y >= global_ubo.height)
+	if(pos.x < 0 || pos.y < 0 || pos.x >= global_ubo.width || pos.y >= global_ubo.height)
         return vec4(0);
 
     return imageLoad(IMG_ASVGF_COLOR, pos);
@@ -129,6 +130,22 @@ ivec2 get_output_position()
     return ivec2(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y);
 }
 
+// Q2RTX stores radial distance along the primary ray. FSR expects finite,
+// non-inverted device depth in [0, 1]. Reconstruct the view position through
+// the same projection the path tracer used to get a real view-space Z
+// (projection_fov_scale is zero for the rectilinear projection, so it cannot
+// undo the radial term), then apply the perspective depth mapping explicitly.
+// global_ubo.P is not usable here: its z row is not a [0, 1] raster mapping.
+// The planes match vkpt_refdef.z_near/z_far and the cameraNear/Far given to FSR.
+float radial_distance_to_device_depth(float distance, ivec2 pixel)
+{
+    const float z_near = 1.0;
+    const float z_far = 4096.0;
+    vec2 screen_pos = (vec2(pixel) + 0.5) / vec2(global_ubo.width, global_ubo.height);
+    float view_z = max(projection_screen_to_view(screen_pos, distance, false).z, z_near);
+    return clamp((z_far * (view_z - z_near)) / ((z_far - z_near) * view_z), 0.0, 1.0);
+}
+
 void main()
 {
     int other_side_offset;
@@ -137,7 +154,13 @@ void main()
     
     if (opos.x >= global_ubo.width || opos.y >= global_ubo.height)
     {
+        // Outside the active render rectangle: leave neutral values in every
+        // image that a display-sized consumer (FSR3, TAA) may read.
         imageStore(IMG_FLAT_COLOR, opos, vec4(0));
+        imageStore(IMG_FLAT_MOTION, opos, vec4(0));
+        imageStore(IMG_FSR3_DEPTH, opos, vec4(1.0));
+        imageStore(IMG_FSR3_REACTIVE_MASK, opos, vec4(0));
+        imageStore(IMG_FSR3_TRANSPARENCY_MASK, opos, vec4(0));
         return;
     }
 
@@ -166,8 +189,17 @@ void main()
 
         // Make sure that transparent surfaces contain motion vectors for the brightest component
         // (reflection or refraction), not a mix of both. Helps with TAA quality.
-        if(luminance(neighbors.rgb) > luminance(center.rgb))
-            use_center_mv = false;
+		ivec2 other_pos = ipos + ivec2(other_side_offset, 0);
+		if(other_pos.x >= 0 && other_pos.x < global_ubo.width &&
+			luminance(neighbors.rgb) > luminance(center.rgb))
+			use_center_mv = false;
+
+        // That choice is a per-pixel comparison of noisy radiance, so it flips from
+        // frame to frame. TAA tolerates it, FSR3 does not: it would see the motion
+        // vector and depth of a pixel swap between the reflected and the refracted
+        // surface every frame. Stay on this pixel's own field instead.
+        if(global_ubo.fsr3_enabled != 0)
+            use_center_mv = true;
 
         // Blend the color, not the checkerboard flags.
         color.rgb = mix(center.rgb, neighbors.rgb, 0.5);
@@ -179,6 +211,33 @@ void main()
     }
 
     imageStore(IMG_FLAT_COLOR, opos, color);
+
+    ivec2 selected_ipos = use_center_mv ? ipos : ipos + ivec2(other_side_offset, 0);
+    int selected_flags = use_center_mv
+        ? checkerboard_flags
+        : int(imageLoad(IMG_ASVGF_COLOR, selected_ipos).a);
+    float view_distance = texelFetch(TEX_PT_VIEW_DEPTH_A, selected_ipos, 0).x;
+    bool real_hit = abs(view_distance) > 0.0 && abs(view_distance) < float(PRIMARY_RAY_T_MAX);
+    float device_depth = real_hit
+        ? radial_distance_to_device_depth(abs(view_distance), opos)
+        : 1.0;
+
+    vec4 transparent = texelFetch(TEX_PT_TRANSPARENT, selected_ipos, 0);
+    float transparency_mask = real_hit ? clamp(transparent.a, 0.0, 1.0) : 0.0;
+    bool split_surface = (selected_flags & (CHECKERBOARD_FLAG_REFLECTION | CHECKERBOARD_FLAG_REFRACTION)) != 0;
+
+    // The reactive mask drives FSR3's accumulation to zero and disables its
+    // anti-flicker pass, so it carries alpha-blended coverage only, and never a
+    // value near one. Reflective and refractive surfaces - whose shading does not
+    // follow their motion vectors - belong on the transparency & composition mask,
+    // which only relaxes the locks and the color clamp.
+    float reactive_mask = min(transparency_mask, 0.9);
+    float composition_mask = max(transparency_mask,
+        split_surface ? clamp(global_ubo.flt_fsr_reflection_tc, 0.0, 1.0) : 0.0);
+
+    imageStore(IMG_FSR3_DEPTH, opos, vec4(device_depth));
+    imageStore(IMG_FSR3_REACTIVE_MASK, opos, vec4(reactive_mask));
+    imageStore(IMG_FSR3_TRANSPARENCY_MASK, opos, vec4(composition_mask));
 
     if(use_center_mv)
         imageStore(IMG_FLAT_MOTION, opos, imageLoad(IMG_PT_MOTION, ipos));

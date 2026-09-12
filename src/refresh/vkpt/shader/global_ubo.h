@@ -52,6 +52,13 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 	UBO_CVAR_DO(flt_fixed_albedo, 0) /* if nonzero, replaces surface albedo with that value after filtering */ \
 	UBO_CVAR_DO(flt_grad_weapon, 0.25) /* gradient scale for the first person weapon, [0..1] */ \
 	UBO_CVAR_DO(flt_min_alpha_color_hf, 0.02) /* minimum weight for the new frame data, color channel, (0..1] */ \
+	UBO_CVAR_DO(flt_nrd_spec_sh, 1) /* directional specular denoising */ \
+	UBO_CVAR_DO(flt_nrd_spec_antilag, 0) /* restore SDK specular anti-lag defaults */ \
+	UBO_CVAR_DO(flt_nrd_spec_confidence, 1) /* retraced lighting confidence */ \
+	UBO_CVAR_DO(flt_nrd_spec_history_seconds, 1) /* accumulation duration, capped at 60 frames */ \
+	UBO_CVAR_DO(flt_nrd_spec_lobe_scale, 1.5) /* SH normal rejection tolerance multiplier */ \
+	UBO_CVAR_DO(flt_nrd_debug, 0) /* 1 confidence, 2 unresolved specular, 3 resolved specular */ \
+	UBO_CVAR_DO(flt_nrd_spec_denoiser, 1) /* NRD specular denoiser: 0 = REBLUR, 1 = RELAX */ \
 	UBO_CVAR_DO(flt_min_alpha_color_lf, 0.01) \
 	UBO_CVAR_DO(flt_min_alpha_color_spec, 0.01) \
 	UBO_CVAR_DO(flt_min_alpha_moments_hf, 0.01) /* minimum weight for the new frame data, moments channel, (0..1] */  \
@@ -60,6 +67,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 	UBO_CVAR_DO(flt_scale_overlay, 1.0) /* scale for transparent and emissive objects visible with primary rays */ \
 	UBO_CVAR_DO(flt_scale_spec, 1) \
 	UBO_CVAR_DO(flt_show_gradients, 0) /* switch for showing the gradient values as overlay image, 0 or 1 */ \
+	UBO_CVAR_DO(flt_fsr_reflection_tc, 0.6) /* FSR3 transparency&composition mask value on reflective and refractive pixels, [0..1] */ \
 	UBO_CVAR_DO(flt_taa, 2) /* temporal anti-aliasing mode: 0 = off, 1 = regular TAA, 2 = temporal upscale */ \
 	UBO_CVAR_DO(flt_taa_anti_sparkle, 0.25) /* strength of the anti-sparkle filter of TAA, [0..1] */ \
 	UBO_CVAR_DO(flt_taa_variance, 1.0) /* temporal AA variance window scale, 0 means disable NCC, [0..inf) */ \
@@ -202,14 +210,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 	GLOBAL_UBO_VAR_LIST_DO(vec2,            projection_fov_scale) \
 	GLOBAL_UBO_VAR_LIST_DO(vec2,            projection_fov_scale_prev) \
 	\
-	GLOBAL_UBO_VAR_LIST_DO(vec3,            padding) \
+	GLOBAL_UBO_VAR_LIST_DO(vec2,            padding) \
+	GLOBAL_UBO_VAR_LIST_DO(int,             fsr3_enabled) \
 	GLOBAL_UBO_VAR_LIST_DO(int,             pt_projection) \
 	\
-	GLOBAL_UBO_VAR_LIST_DO(uvec4,           easu_const0) \
-	GLOBAL_UBO_VAR_LIST_DO(uvec4,           easu_const1) \
-	GLOBAL_UBO_VAR_LIST_DO(uvec4,           easu_const2) \
-	GLOBAL_UBO_VAR_LIST_DO(uvec4,           easu_const3) \
-	GLOBAL_UBO_VAR_LIST_DO(uvec4,           rcas_const0) \
 	\
 	GLOBAL_UBO_VAR_LIST_DO(vec2,            sub_pixel_jitter) \
 	GLOBAL_UBO_VAR_LIST_DO(float,           prev_adapted_luminance) \
@@ -238,6 +242,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 	GLOBAL_UBO_VAR_LIST_DO(int,             weapon_left_handed) \
 	GLOBAL_UBO_VAR_LIST_DO(float,           ui_color_scale) \
 	\
+	GLOBAL_UBO_VAR_LIST_DO(int,             nrd_active) \
+	GLOBAL_UBO_VAR_LIST_DO(int,             nrd_history_valid) \
 	UBO_CVAR_LIST // WARNING: Do not put any other members into global_ubo after this: the CVAR list is not vec4-aligned
 
 BEGIN_SHADER_STRUCT( DynLightData )

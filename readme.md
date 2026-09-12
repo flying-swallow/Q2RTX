@@ -36,6 +36,13 @@ The **Quake II** game data files remain copyrighted and licensed under the
 original id Software terms, so you cannot redistribute the pak files from the
 original game.
 
+The required [NVIDIA Real-time Denoisers (NRD)](https://github.com/NVIDIA-RTX/NRD)
+SDK dependency for VKPT is governed by the NVIDIA RTX SDKs License in
+[extern/NRD/LICENSE.txt](extern/NRD/LICENSE.txt), not the GPL. When enabled, its
+NVIDIA-licensed SDK code is built into the application. Public redistribution of
+binaries containing that code is not enabled or endorsed pending permission and
+compliance review.
+
 ## Features
 
 **Quake II RTX** introduces the following features:
@@ -114,6 +121,8 @@ Note: Linux ppc64le is also known to work though not officially supported.
 | CMake <br> https://cmake.org/download/                  | 3.8         |
 | Vulkan SDK <br> https://www.lunarg.com/vulkan-sdk/      | 1.2.162     |
 
+The NRD SDK requires CMake 3.22 or newer.
+
 ## Submodules
 
 * [zlib](https://github.com/madler/zlib)
@@ -124,12 +133,18 @@ Note: Linux ppc64le is also known to work though not officially supported.
 * [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers)
 * [glslang](https://github.com/KhronosGroup/glslang) (optional, see the `CONFIG_BUILD_GLSLANG` CMake option)
 * [openal-soft](https://github.com/kcat/openal-soft)
+* [FidelityFX SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) (required for the Vulkan renderer; initialize with `git submodule update --init extern/FidelityFX-SDK`)
+* [NRD](https://github.com/NVIDIA-RTX/NRD) (required; initialize with `git submodule update --init extern/NRD`)
 
 ## Build Instructions
 
   1. Clone the repository and its submodules from git :
 
      `git clone --recursive https://github.com/NVIDIA/Q2RTX.git `
+
+     If the repository was not cloned recursively, initialize the staged
+     FidelityFX SDK before configuring the Vulkan renderer:
+     `git submodule update --init extern/FidelityFX-SDK`
 
   2. Create a build folder named `build` under the repository root (`Q2RTX/build`)     
 
@@ -143,6 +158,16 @@ Note: Linux ppc64le is also known to work though not officially supported.
 
   4. Configure CMake with either the GUI or the command line and point the build at the `build` folder
      created in step 2.
+
+     Initialize the required NRD SDK submodule before configuring:
+     `git submodule update --init extern/NRD`
+     Configure the SDK with `cmake -S extern/NRD -B build/nrd`. NRD requires CMake
+     3.22 or newer when it is enabled.
+
+     The Vulkan build compiles the pinned FSR3 upscaler sources and HLSL
+     shaders from the staged SDK. When `CONFIG_BUILD_GLSLANG` is enabled,
+     CMake uses the bundled glslang HLSL front end; otherwise provide a system
+     `glslangValidator` with HLSL support.
 
      `cd build`  
      `cmake ..`

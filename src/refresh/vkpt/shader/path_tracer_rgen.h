@@ -35,6 +35,7 @@ uniform accelerationStructureEXT topLevelAS[TLAS_COUNT];
 
 #include "asvgf.glsl"
 #include "brdf.glsl"
+#include "nrd_common.glsl"
 #include "water.glsl"
 
 /* RNG seeds contain 'X' and 'Y' values that are computed w/ a modulo BLUE_NOISE_RES,
@@ -652,6 +653,8 @@ get_specular_sampled_lighting_weight(float roughness, vec3 N, vec3 V, vec3 L, fl
     return clamp(pdfw / (pdfw + ggxVndfPdf), 0, 1);
 }
 
+vec3 sampled_direct_light_direction = vec3(0.0);
+
 void
 get_direct_illumination(
 	vec3 position, 
@@ -670,11 +673,12 @@ get_direct_illumination(
 	float direct_specular_weight, 
 	bool enable_polygonal,
 	bool enable_dynamic,
-	bool is_gradient, 
 	int bounce,
+	out float local_light_sample_distance,
 	out vec3 diffuse,
 	out vec3 specular)
 {
+	local_light_sample_distance = 0;
 	diffuse = vec3(0);
 	specular = vec3(0);
 
@@ -709,9 +713,8 @@ get_direct_illumination(
 			view_direction, 
 			phong_exp, 
 			phong_scale,
-			phong_weight, 
-			is_gradient, 
-			pos_on_light_polygonal, 
+			phong_weight,
+			pos_on_light_polygonal,
 			contrib_polygonal,
 			polygonal_light_index,
 			polygonal_light_pdfw,
@@ -783,6 +786,7 @@ get_direct_illumination(
 		polygon lights do not have polygonal indices, and it would be difficult to map them 
 		between frames.
 	*/
+#ifndef NRD_CONFIDENCE_TRACE
 	if(global_ubo.pt_light_stats != 0 
 		&& is_polygonal 
 		&& !null_light
@@ -799,6 +803,7 @@ get_direct_illumination(
 		atomicAdd(light_stats_bufers[global_ubo.current_frame_idx % NUM_LIGHT_STATS_BUFFERS].stats[addr], 1);
 	}
 
+#endif
 	if(null_light)
 		return;
 
@@ -806,6 +811,7 @@ get_direct_illumination(
 
 	vec3 L = pos_on_light - position;
 	L = normalize(L);
+	sampled_direct_light_direction = L;
 
 	if(is_polygonal && direct_specular_weight > 0 && polygonal_light_is_sky && global_ubo.pt_specular_mis != 0)
 	{
@@ -831,6 +837,9 @@ get_direct_illumination(
 
 	float diffuse_brdf = NdotL / M_PI;
 	diffuse = radiance * diffuse_brdf * (vec3(1.0) - F);
+
+	if(!any(isnan(diffuse)) && !any(isinf(diffuse)) && any(notEqual(diffuse, vec3(0))))
+		local_light_sample_distance = length(pos_on_light - position);
 }
 
 void
@@ -979,23 +988,6 @@ vec3 get_emissive_shell(uint material_id, uint shell)
 
     return c;
 }
-
-bool get_is_gradient(ivec2 ipos)
-{
-	if(global_ubo.flt_enable != 0)
-	{
-		uint u = texelFetch(TEX_ASVGF_GRAD_SMPL_POS_A, ipos / GRAD_DWN, 0).r;
-
-		ivec2 grad_strata_pos = ivec2(
-				u >> (STRATUM_OFFSET_SHIFT * 0),
-				u >> (STRATUM_OFFSET_SHIFT * 1)) & STRATUM_OFFSET_MASK;
-
-		return (u > 0 && all(equal(grad_strata_pos, ipos % GRAD_DWN)));
-	}
-	
-	return false;
-}
-
 
 void
 get_material(

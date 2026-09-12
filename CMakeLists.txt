@@ -3,7 +3,15 @@ cmake_policy(SET CMP0069 NEW)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-project(quake2-RTX)
+project(quake2-RTX LANGUAGES C CXX)
+
+include(CTest)
+
+# FidelityFX SDK headers used by the FSR3 host require C++20 (notably
+# std::span). Keep the language mode explicit for all C++ targets.
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 set(Q2RTX_VERSION_MAJOR 1)
 set(Q2RTX_VERSION_MINOR 8)
 set(Q2RTX_VERSION_POINT 1)
@@ -27,6 +35,7 @@ execute_process(
 
 OPTION(CONFIG_GL_RENDERER "Enable GL renderer" ON)
 OPTION(CONFIG_VKPT_RENDERER "Enable VKPT renderer" ON)
+OPTION(CONFIG_VKPT_NRD "Enable the NRD/NRI Vulkan denoiser integration" OFF)
 OPTION(CONFIG_VKPT_ENABLE_DEVICE_GROUPS "Enable device groups (multi-gpu) support" ON)
 OPTION(CONFIG_VKPT_ENABLE_IMAGE_DUMPS "Enable image dumping functionality" OFF)
 OPTION(CONFIG_USE_CURL "Use CURL for HTTP support" ON)
@@ -78,6 +87,36 @@ set (CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/Bin CACHE PATH "Single
 if (CMAKE_SIZEOF_VOID_P EQUAL 8)
     set( IS_64_BIT 1 )
 endif ()
+
+if (CONFIG_VKPT_NRD AND NOT CONFIG_VKPT_RENDERER)
+    message(FATAL_ERROR "CONFIG_VKPT_NRD requires CONFIG_VKPT_RENDERER=ON")
+endif()
+
+if (CONFIG_VKPT_RENDERER)
+    if (NOT IS_64_BIT)
+        message(FATAL_ERROR "CONFIG_VKPT_RENDERER requires a 64-bit build")
+    endif()
+    if (CMAKE_VERSION VERSION_LESS 3.22)
+        message(FATAL_ERROR "CONFIG_VKPT_RENDERER requires CMake 3.22 or newer")
+    endif()
+    foreach(vkpt_dependency
+        extern/FidelityFX-SDK/Kits/FidelityFX
+        extern/NRD
+        extern/Vulkan-Headers/include
+    )
+        if (NOT IS_DIRECTORY "${CMAKE_SOURCE_DIR}/${vkpt_dependency}")
+            message(FATAL_ERROR "CONFIG_VKPT_RENDERER requires ${vkpt_dependency}")
+        endif()
+    endforeach()
+    # NRD is part of the VKPT renderer, rather than an independently
+    # selectable feature. Force the cache value so stale -D or prior
+    # configure values cannot produce a partially configured renderer.
+    set(CONFIG_VKPT_NRD ON CACHE BOOL "Enable the NRD/NRI Vulkan denoiser integration" FORCE)
+    add_definitions(-DCONFIG_VKPT_NRD=1)
+else()
+    # A GL-only build must not configure NRD or fetch its NRI dependencies.
+    set(CONFIG_VKPT_NRD OFF CACHE BOOL "Enable the NRD/NRI Vulkan denoiser integration" FORCE)
+endif()
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 

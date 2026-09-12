@@ -51,17 +51,41 @@ purposes only.
     Copyright (c) 2019 id Software LLC, a ZeniMax Media company
     All Rights Reserved.    
 
-* FidelityFX Super Resolution 1.0 (FSR) Shader and Sample Code
-    Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
-    Licensed under the terms of the "MIT" or "Expat" license, see below.
-    https://github.com/GPUOpen-Effects/FidelityFX-CAS
+* AMD FSR SDK 2.3.0 / FSR 3.1.5 temporal upscaling sources
+    Copyright (C) Advanced Micro Devices, Inc.
+    This fork compiles and redistributes the following FSR3 SDK files under
+    the MIT License, as identified in extern/FidelityFX-SDK/docs/license.md:
+    `Kits/FidelityFX/upscalers/fsr3/internal/ffx_fsr3upscaler.cpp`
+    `Kits/FidelityFX/api/internal/ffx_assert.cpp`
+    `Kits/FidelityFX/api/internal/ffx_object_management.cpp`
+    and the FSR3 shader sources named by
+    `src/refresh/vkpt/fsr3/fsr3_shader_manifest.cmake`:
+    `Kits/FidelityFX/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_prepare_inputs_pass.hlsl`
+    `Kits/FidelityFX/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_luma_pyramid_pass.hlsl`
+    `Kits/FidelityFX/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_shading_change_pyramid_pass.hlsl`
+    `Kits/FidelityFX/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_shading_change_pass.hlsl`
+    `Kits/FidelityFX/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_prepare_reactivity_pass.hlsl`
+    `Kits/FidelityFX/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_luma_instability_pass.hlsl`
+    `Kits/FidelityFX/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_accumulate_pass.hlsl`
+    `Kits/FidelityFX/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_rcas_pass.hlsl`
+    `Kits/FidelityFX/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_debug_view_pass.hlsl`
+    `Kits/FidelityFX/upscalers/fsr3/internal/shaders/ffx_fsr3upscaler_autogen_reactive_pass.hlsl`.
+
+* NVIDIA Real-time Denoisers (NRD)
+    Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+    Licensed under the NVIDIA RTX SDKs License; see extern/NRD/LICENSE.txt.
+    This software contains source code provided by NVIDIA Corporation.
+    https://github.com/NVIDIA-RTX/NRD
 
 Roughness and specular channels were adjusted in texture maps to work with
 the Quake II RTX engine.
 
-FidelityFX Super Resolution 1.0 (FSR) License Notice
-----------------------------------------------------
-Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+AMD FSR SDK 2.3.0 / FSR 3.1.5 Temporal Upscaling Source MIT License Notice
+--------------------------------------------------------------------------
+Copyright (C) Advanced Micro Devices, Inc.
+
+This notice applies only to the three C++ SDK source files and the FSR3 shader
+source files listed above.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

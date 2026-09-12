@@ -87,7 +87,7 @@ In order to preserve surface detail, the LF channel uses spherical harmonics.
 Specifically, the incoming radiance is converted to YCoCg color space, and the 
 Y (luma) component is decomposed into 4 SH (spherical harmonic) coefficients.
 See the SH-related functions in `utils.glsl`, the decomposition code in 
-`indirect_lighting.rgen` and the projection code in `asvgf_atrous.comp`.
+`indirect_lighting.rgen` and the projection code in the former A-SVGF filter.
 
 Also, the LF channel's spatial filter is computed in 1/3 resolution for 
 performance reasons.
@@ -97,7 +97,7 @@ Specular lighting (SPEC)
 ========================
 
 The SPEC channel only goes through a temporal filter. All temporal filters are 
-fused together into `asvgf_temporal.comp`. The reason for using a temporal-only
+fused together into the former A-SVGF temporal pass. The reason for using a temporal-only
 filter is that all the spatial filters that we have experimented with in this 
 project did not provide adequate image quality on normal-mapped surfaces,
 or did not have good enough performance. 
@@ -133,7 +133,7 @@ SPEC channel:
   3. If roughness is higher than `pt_fake_roughness_threshold`, then specular
      reflection rays are not computed because the result would be too noisy.
      Instead, specular reflections are later derived from the diffuse spherical 
-     harmonics. See the `asvgf_atrous.comp` shader for more info.
+     harmonics. See the historical A-SVGF filter implementation for more info.
 
 */
 

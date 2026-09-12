@@ -1,0 +1,68 @@
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_nonuniform_qualifier : enable
+#define GLOBAL_UBO_DESC_SET_IDX 0
+#include "global_ubo.h"
+#define GLOBAL_TEXTURES_DESC_SET_IDX 1
+#include "global_textures.h"
+#include "projection.glsl"
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(push_constant) uniform Push { int step_size; } push;
+
+vec3 confidence_decode_normal(vec2 p)
+{
+    vec3 n = vec3(p, 1.0 - abs(p.x) - abs(p.y));
+    float t = max(-n.z, 0.0);
+    n.xy += mix(vec2(t), vec2(-t), greaterThanEqual(n.xy, vec2(0.0)));
+    return normalize(n);
+}
+
+vec4 load_gradient(ivec2 p)
+{
+    return (push.step_size & 1) != 0 ? imageLoad(IMG_NRD_CONFIDENCE_GRADIENT_0, p)
+        : imageLoad(IMG_NRD_CONFIDENCE_GRADIENT_1, p);
+}
+
+vec3 previous_position(ivec2 p, ivec2 size, float z)
+{
+    vec3 dir = projection_screen_to_view((vec2(p) + 0.5) / vec2(size), 1.0, true);
+    return dir * (abs(z) / max(dir.z, 1e-6));
+}
+
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = (ivec2(global_ubo.width, global_ubo.height) + 4) / 5;
+    if (any(greaterThanEqual(p, size))) return;
+    vec4 center = load_gradient(p);
+    vec3 N = mat3(global_ubo.V_prev) * confidence_decode_normal(center.yz);
+    vec3 X = previous_position(p, size, center.w);
+    float gradient = center.x;
+    float total = 1.0;
+    if (abs(center.w) < float(PRIMARY_RAY_T_MAX)) {
+        for (int y = -2; y <= 2; y++) for (int x = -2; x <= 2; x++) {
+            if (x == 0 && y == 0) continue;
+            ivec2 q = clamp(p + ivec2(x, y) * push.step_size, ivec2(0), size - 1);
+            vec4 neighbor = load_gradient(q);
+            if (abs(neighbor.w) >= float(PRIMARY_RAY_T_MAX)) continue;
+            vec3 Nq = mat3(global_ubo.V_prev) * confidence_decode_normal(neighbor.yz);
+            vec3 Xq = previous_position(q, size, neighbor.w);
+            float weight = exp(-0.5 * float(x*x + y*y));
+            float plane_delta = abs(dot(N, Xq - X));
+            weight *= 1.0 - smoothstep(0.0, max(abs(center.w) * 0.02, 0.01), plane_delta);
+            weight *= pow(max(dot(N, Nq), 0.0), 2.0);
+            gradient += neighbor.x * weight;
+            total += weight;
+        }
+    }
+    gradient /= total;
+    if (push.step_size == 5) {
+        // Convert once, after spatial filtering. RELAX's additional square is
+        // applied at the NRD boundary; no temporal filtering delays responses.
+        gradient = pow(max(1.0 - clamp(gradient, 0.0, 1.0), 0.0), 2.0);
+        if (global_ubo.nrd_history_valid == 0) gradient = 0.0;
+    }
+    vec4 output_value = vec4(gradient, center.yzw);
+    if ((push.step_size & 1) != 0) imageStore(IMG_NRD_CONFIDENCE_GRADIENT_1, p, output_value);
+    else imageStore(IMG_NRD_CONFIDENCE_GRADIENT_0, p, output_value);
+}

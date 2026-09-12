@@ -172,7 +172,6 @@ sample_polygonal_lights(
 		float phong_exp, 
 		float phong_scale,
 		float phong_weight,
-		bool is_gradient,
 		out vec3 position_light,
 		out vec3 light_color,
 		out int light_index,
@@ -237,11 +236,7 @@ sample_polygonal_lights(
 		float light_lum = luminance(light.color);
 
 		// Apply light style scaling.
-		// For gradient pixels, use the style from the previous frame here
-		// in order to keep the CDF consistent and make sure that the same light is picked,
-		// regardless of animations. This makes the image more stable around blinking lights,
-		// especially in shadowed areas.
-		light_lum *= is_gradient ? light.prev_style_scale : light.light_style_scale;	
+		light_lum *= light.light_style_scale;
 
 		if(light_lum < 0 && global_ubo.environment_type == ENVIRONMENT_DYNAMIC)
 		{
@@ -254,15 +249,16 @@ sample_polygonal_lights(
 
 		// Apply CDF adjustment based on light shadowing statistics from one of the previous frames.
 		// See comments in function `get_direct_illumination` in `path_tracer_rgen.h`
-		if(global_ubo.pt_light_stats != 0 
+		if(
+#ifdef NRD_CONFIDENCE_TRACE
+            false &&
+#endif
+            global_ubo.pt_light_stats != 0
 			&& m > 0 
 			&& current_idx < global_ubo.num_static_lights)
 		{
 			uint buffer_idx = global_ubo.current_frame_idx;
-			// Regular pixels get shadowing stats from the previous frame;
-			// Gradient pixels get the stats from two frames ago because they need to match
-			// the light sampling from the previous frame.
-			buffer_idx += is_gradient ? (NUM_LIGHT_STATS_BUFFERS - 2) : (NUM_LIGHT_STATS_BUFFERS - 1);
+			buffer_idx += NUM_LIGHT_STATS_BUFFERS - 1;
 			buffer_idx = buffer_idx % NUM_LIGHT_STATS_BUFFERS;
 
 			uint addr = get_light_stats_addr(list_idx, current_idx, get_primary_direction(n));

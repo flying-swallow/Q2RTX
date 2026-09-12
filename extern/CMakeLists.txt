@@ -29,7 +29,10 @@ endif()
 if(CONFIG_BUILD_GLSLANG)
     option(BUILD_EXTERNAL OFF)
     option(ENABLE_SPVREMAPPER OFF)
-    option(ENABLE_HLSL OFF)
+    # FSR3 shader compilation uses the bundled glslang HLSL front end.  FORCE
+    # is needed because a prior configure may have cached the standalone
+    # glslang default (ENABLE_HLSL=OFF).
+    set(ENABLE_HLSL ON CACHE BOOL "Enables HLSL input support" FORCE)
     option(ENABLE_OPT OFF)
     option(ENABLE_PCH OFF)
     option(ENABLE_CTEST OFF)
@@ -112,6 +115,53 @@ target_include_directories(stb INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/stb)
 
 add_library(tinyobjloader INTERFACE)
 target_include_directories(tinyobjloader INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/tinyobjloader-c)
+
+# FSR 3.1 host implementation. The Vulkan renderer owns the backend, so this
+# target contains only the SDK's renderer-independent upscaler and the small
+# set of API support files it directly needs. In particular, do not pull in
+# frame generation, DX12 backends, or generated SDK shader blobs.
+if (CONFIG_VKPT_RENDERER)
+    set(FFX_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/FidelityFX-SDK/Kits/FidelityFX")
+    add_library(ffx_fsr3upscaler STATIC
+        "${FFX_SDK_ROOT}/upscalers/fsr3/internal/ffx_fsr3upscaler.cpp"
+        "${FFX_SDK_ROOT}/api/internal/ffx_assert.cpp"
+        "${FFX_SDK_ROOT}/api/internal/ffx_object_management.cpp"
+    )
+    target_include_directories(ffx_fsr3upscaler PRIVATE
+        "${FFX_SDK_ROOT}/api/include"
+        "${FFX_SDK_ROOT}/api/internal"
+        "${FFX_SDK_ROOT}/upscalers/fsr3/include"
+        "${CMAKE_SOURCE_DIR}/src/refresh/vkpt/fsr3"
+    )
+    # The staged SDK omits amdinternal/api/internal/git_hash_branch.h.  The
+    # guarded include only supplies watermark diagnostics, which this host
+    # target does not use; keep the workaround local to this target.
+    target_compile_definitions(ffx_fsr3upscaler PRIVATE _GAMING_XBOX=1 FFX_GCC=1)
+    # The SDK's opaque context default is too small for this SDK revision's
+    # FSR3 private state. Consumers of the public header must use the same
+    # value when this target is integrated.
+    target_compile_definitions(ffx_fsr3upscaler PRIVATE FFX_SDK_DEFAULT_CONTEXT_SIZE=262144)
+    if (NOT MSVC)
+        target_compile_options(ffx_fsr3upscaler PRIVATE
+            -include "${CMAKE_SOURCE_DIR}/src/refresh/vkpt/fsr3/fsr3_sdk_compat.h")
+    endif()
+    set_target_properties(ffx_fsr3upscaler PROPERTIES FOLDER extern)
+endif()
+
+# NRD is required by VKPT. Its FetchContent dependencies (ShaderMake, MathLib,
+# and NRI) are intentionally kept out of GL-only builds.
+if (CONFIG_VKPT_RENDERER)
+    set(NRD_STATIC_LIBRARY ON CACHE BOOL "Build static library" FORCE)
+    set(NRD_NRI ON CACHE BOOL "Pull, build and include NRI into NRD SDK package" FORCE)
+    set(NRD_EMBEDS_SPIRV_SHADERS ON CACHE BOOL "NRD embeds SPIRV shaders" FORCE)
+    set(NRD_EMBEDS_DXIL_SHADERS OFF CACHE BOOL "NRD embeds DXIL shaders" FORCE)
+    set(NRD_EMBEDS_DXBC_SHADERS OFF CACHE BOOL "NRD embeds DXBC shaders" FORCE)
+    set(NRD_SUPPORTS_QUAD_INTRINSICS OFF CACHE BOOL "Enable quad intrinsics" FORCE)
+    set(NRD_NORMAL_ENCODING 4 CACHE STRING "Normal encoding variant" FORCE)
+    set(NRD_ROUGHNESS_ENCODING 1 CACHE STRING "Roughness encoding variant" FORCE)
+
+    add_subdirectory(NRD EXCLUDE_FROM_ALL)
+endif()
 
 #
 # openal-soft (64-bit only, not needed for the 32-bit server)

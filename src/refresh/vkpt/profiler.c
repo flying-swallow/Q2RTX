@@ -284,8 +284,11 @@ draw_query(int x, int y, qhandle_t font, const char *enum_name, int idx)
 }
 
 void
-draw_profiler(int enable_asvgf)
+draw_profiler(int)
 {
+	/* The frame graph can fall back after recording NRD work, so use the
+	 * measured composite pass rather than cvar state or backend availability. */
+	bool use_nrd = vkpt_get_profiler_result(PROFILER_NRD_COMPOSITE) > 0.0;
 	float profiler_scale = R_ClampScale(cvar_profiler_scale);
 	int x = 500 * profiler_scale;
 	int y = 100 * profiler_scale;
@@ -311,10 +314,6 @@ draw_profiler(int enable_asvgf)
 	PROFILER_DO(PROFILER_PRIMARY_RAYS, 1);
 	if (cvar_pt_reflect_refract->integer > 0) { PROFILER_DO(PROFILER_REFLECT_REFRACT_1, 1); }
 	if (cvar_pt_reflect_refract->integer > 1) { PROFILER_DO(PROFILER_REFLECT_REFRACT_2, 1); }
-	if (enable_asvgf)
-	{
-		PROFILER_DO(PROFILER_ASVGF_GRADIENT_REPROJECT, 1);
-	}
 	PROFILER_DO(PROFILER_DIRECT_LIGHTING, 1);
 	PROFILER_DO(PROFILER_INDIRECT_LIGHTING, 1);
 	PROFILER_DO(PROFILER_INDIRECT_LIGHTING_0, 2);
@@ -322,13 +321,13 @@ draw_profiler(int enable_asvgf)
 	PROFILER_DO(PROFILER_GOD_RAYS, 1);
 	PROFILER_DO(PROFILER_GOD_RAYS_REFLECT_REFRACT, 1);
 	PROFILER_DO(PROFILER_GOD_RAYS_FILTER, 1);
-	if (enable_asvgf)
+	if (use_nrd)
 	{
-		PROFILER_DO(PROFILER_ASVGF_FULL, 1);
-		PROFILER_DO(PROFILER_ASVGF_RECONSTRUCT_GRADIENT, 2);
-		PROFILER_DO(PROFILER_ASVGF_TEMPORAL, 2);
-		PROFILER_DO(PROFILER_ASVGF_ATROUS, 2);
-		PROFILER_DO(PROFILER_ASVGF_TAA, 2);
+        PROFILER_DO(PROFILER_NRD_CONFIDENCE_TRACE, 1);
+        PROFILER_DO(PROFILER_NRD_CONFIDENCE_FILTER, 1);
+		PROFILER_DO(PROFILER_NRD_PREPARE, 1);
+		PROFILER_DO(PROFILER_NRD_DENOISE, 1);
+		PROFILER_DO(PROFILER_NRD_COMPOSITE, 1);
 	}
 	else
 	{
@@ -343,8 +342,6 @@ draw_profiler(int enable_asvgf)
 	if(cvar_flt_fsr_enable->integer != 0)
 	{
 		PROFILER_DO(PROFILER_FSR, 1);
-		PROFILER_DO(PROFILER_FSR_EASU, 2);
-		PROFILER_DO(PROFILER_FSR_RCAS, 2);
 	}
 #undef PROFILER_DO
 

@@ -8,6 +8,7 @@ q2rtxded
 game*.so
 *.swp
 build*/
+CMakeCache.txt
 shader_vkpt
 *.exe
 *.ilk
@@ -42,6 +43,8 @@ music/
 
 q2config.cfg
 save
+captures/
+*.gfxr
 */docs
 baseq2/**/*.txt
 !baseq2/*.txt

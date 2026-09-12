@@ -36,10 +36,12 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 layout(constant_id = 0) const uint spec_enable_caustics = 0;
 
 void
-direct_lighting(ivec2 ipos, bool is_odd_checkerboard, out vec3 high_freq, out vec3 o_specular)
+direct_lighting(ivec2 ipos, bool is_odd_checkerboard, out vec3 high_freq, out vec3 o_specular,
+		out float o_hit_distance)
 {
 	high_freq = vec3(0);
 	o_specular = vec3(0);
+	o_hit_distance = 0.0;
 
 	rng_seed = texelFetch(TEX_ASVGF_RNG_SEED_A, ipos, 0).r;
 
@@ -78,13 +80,11 @@ direct_lighting(ivec2 ipos, bool is_odd_checkerboard, out vec3 high_freq, out ve
 		global_ubo.pt_direct_roughness_threshold - 0.02, 
 		global_ubo.pt_direct_roughness_threshold + 0.02, 
 		primary_roughness);
-
-	bool is_gradient = get_is_gradient(ipos);
-
     vec3 primary_albedo, primary_base_reflectivity;
     get_reflectivity(primary_base_color.rgb, primary_metallic, primary_albedo, primary_base_reflectivity);
 
-	vec3 direct_diffuse, direct_specular;
+	vec3 local_diffuse, local_specular;
+	float local_light_sample_distance;
     get_direct_illumination(
     	position, 
     	normal, 
@@ -100,15 +100,26 @@ direct_lighting(ivec2 ipos, bool is_odd_checkerboard, out vec3 high_freq, out ve
     	primary_medium, 
     	spec_enable_caustics != 0, 
     	direct_specular_weight, 
-    	global_ubo.pt_direct_polygon_lights > 0,
-    	global_ubo.pt_direct_dyn_lights > 0,
-    	is_gradient,
-    	0,
-    	direct_diffuse,
-    	direct_specular);
+	    global_ubo.pt_direct_polygon_lights > 0,
+	    global_ubo.pt_direct_dyn_lights > 0,
+	    0,
+	    local_light_sample_distance,
+	    local_diffuse,
+	    local_specular);
 
-    high_freq += direct_diffuse;
-    o_specular += direct_specular;
+    high_freq += local_diffuse;
+	o_specular += local_specular;
+    bool directional_specular = global_ubo.nrd_active != 0 && global_ubo.flt_nrd_spec_sh >= 0.5;
+    vec3 nrd_factor = vec3(1.0);
+    vec4 spec_moment = vec4(0.0);
+    if (directional_specular) {
+        nrd_factor = nrd_specular_factor(normal, -view_direction.xyz, primary_base_reflectivity, primary_roughness);
+        spec_moment = nrd_specular_moment(local_specular / nrd_factor,
+            sampled_direct_light_direction, global_ubo.flt_nrd_spec_denoiser >= 0.5);
+    }
+	float local_diffuse_weight = luminance(max(local_diffuse, vec3(0.0)));
+	float sun_diffuse_weight = 0.0;
+	const float sun_distance = 10000.0;
 	
 	if(global_ubo.pt_direct_sun_light != 0)
 	{
@@ -131,12 +142,30 @@ direct_lighting(ivec2 ipos, bool is_odd_checkerboard, out vec3 high_freq, out ve
 
 		high_freq += direct_sun_diffuse;
 		o_specular += direct_sun_specular;
+        if (directional_specular)
+            spec_moment += nrd_specular_moment(direct_sun_specular / nrd_factor,
+                global_ubo.sun_direction, global_ubo.flt_nrd_spec_denoiser >= 0.5);
+
+		sun_diffuse_weight = luminance(max(direct_sun_diffuse, vec3(0.0)));
 	}
+	float diffuse_weight = local_diffuse_weight + sun_diffuse_weight;
+	if(diffuse_weight > 0.0)
+		o_hit_distance = (local_light_sample_distance * local_diffuse_weight
+			+ sun_distance * sun_diffuse_weight) / diffuse_weight;
 
 	o_specular = demodulate_specular(primary_base_reflectivity, o_specular);
 
 	high_freq = clamp_output(high_freq);
 	o_specular = clamp_output(o_specular);
+    if (directional_specular) {
+        // Match the clamped signal's energy before adding indirect moments.
+        vec3 radiance = o_specular * max(primary_base_reflectivity, vec3(0.01)) / nrd_factor;
+        float weight = global_ubo.flt_nrd_spec_denoiser >= 0.5
+            ? _NRD_Luminance(radiance) : _NRD_LinearToYCoCg(radiance).x;
+        spec_moment *= weight / max(spec_moment.w, 1e-6);
+        if (any(isnan(spec_moment)) || any(isinf(spec_moment))) spec_moment = vec4(0.0);
+        imageStore(IMG_PT_SPEC_MOMENT, ipos, spec_moment);
+    }
 }
 
 void
@@ -147,9 +176,18 @@ main()
 		ipos.x += global_ubo.width / 2;
 
 	bool is_odd_checkerboard = (rt_LaunchID.z != 0) || (push_constants.gpu_index == 1);
+	// Clear (direct diffuse, indirect diffuse, indirect specular, unused),
+	// including pixels skipped by half-resolution indirect tracing.
+	imageStore(IMG_PT_NRD_HITDIST, ipos, vec4(0.0, 0.0, 0.0, 0.0));
 
+    if (global_ubo.nrd_active != 0) {
+        imageStore(IMG_PT_SPEC_MOMENT, ipos, vec4(0.0));
+        imageStore(IMG_PT_SPEC_FIRST_DIRECTION, ipos, vec4(0.0));
+    }
 	vec3 high_freq, specular;
-	direct_lighting(ipos, is_odd_checkerboard, high_freq, specular);
+	float direct_hit_distance;
+	direct_lighting(ipos, is_odd_checkerboard, high_freq, specular, direct_hit_distance);
+	imageStore(IMG_PT_NRD_HITDIST, ipos, vec4(max(direct_hit_distance, 0.0), 0.0, 0.0, 0.0));
 
 	high_freq *= STORAGE_SCALE_HF;
 	specular *= STORAGE_SCALE_SPEC;

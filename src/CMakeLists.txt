@@ -255,6 +255,7 @@ SET(HEADERS_WINDOWS
 )
 
 SET(SRC_VKPT
+	refresh/vkpt/fsr3_backend_vk.cpp
 	refresh/vkpt/asvgf.c
 	refresh/vkpt/bloom.c
 	refresh/vkpt/bsp_mesh.c
@@ -286,7 +287,13 @@ SET(SRC_VKPT
 	refresh/vkpt/conversion.c
 )
 
+IF (CONFIG_VKPT_RENDERER)
+	LIST(APPEND SRC_VKPT refresh/vkpt/nrd.c)
+ENDIF()
+
 SET(HEADERS_VKPT
+	refresh/vkpt/fsr3_backend_vk.h
+	refresh/vkpt/fsr3_backend_vk_private.h
 	refresh/vkpt/vkpt.h
 	refresh/vkpt/vk_util.h
 	refresh/vkpt/buddy_allocator.h
@@ -308,13 +315,7 @@ set(SRC_SHADERS
 	refresh/vkpt/shader/bloom_downscale.comp
 	refresh/vkpt/shader/compositing.comp
 	refresh/vkpt/shader/checkerboard_interleave.comp
-	refresh/vkpt/shader/asvgf_atrous.comp
-	refresh/vkpt/shader/asvgf_gradient_atrous.comp
-	refresh/vkpt/shader/asvgf_gradient_img.comp
-	refresh/vkpt/shader/asvgf_gradient_reproject.comp
-	refresh/vkpt/shader/asvgf_lf.comp
 	refresh/vkpt/shader/asvgf_taau.comp
-	refresh/vkpt/shader/asvgf_temporal.comp
 	refresh/vkpt/shader/instance_geometry.comp
 	refresh/vkpt/shader/normalize_normal_map.comp
 	refresh/vkpt/shader/tone_mapping_histogram.comp
@@ -328,10 +329,6 @@ set(SRC_SHADERS
 	refresh/vkpt/shader/stretch_pic.vert
 	refresh/vkpt/shader/final_blit.frag
 	refresh/vkpt/shader/final_blit.vert
-	refresh/vkpt/shader/fsr_easu_fp16.comp
-	refresh/vkpt/shader/fsr_easu_fp32.comp
-	refresh/vkpt/shader/fsr_rcas_fp16.comp
-	refresh/vkpt/shader/fsr_rcas_fp32.comp
 	refresh/vkpt/shader/debug_line.frag
 	refresh/vkpt/shader/debug_line.vert
 )
@@ -340,6 +337,7 @@ set(SRC_RT_SHADERS
 	refresh/vkpt/shader/primary_rays.rgen
 	refresh/vkpt/shader/direct_lighting.rgen
 	refresh/vkpt/shader/indirect_lighting.rgen
+	refresh/vkpt/shader/nrd_confidence.rgen
 	refresh/vkpt/shader/path_tracer.rchit
 	refresh/vkpt/shader/path_tracer.rmiss
 	refresh/vkpt/shader/path_tracer_masked.rahit
@@ -351,6 +349,14 @@ set(SRC_RT_SHADERS
 	refresh/vkpt/shader/reflect_refract.rgen
 )
 
+IF (CONFIG_VKPT_RENDERER)
+	LIST(APPEND SRC_SHADERS
+		refresh/vkpt/shader/nrd_prepare.comp
+		refresh/vkpt/shader/nrd_confidence_filter.comp
+		refresh/vkpt/shader/nrd_composite.comp
+	)
+ENDIF()
+
 # Only build shaders in 64-bit builds, because the client
 # is also only built for 64-bit systems.
 IF(IS_64_BIT)
@@ -361,7 +367,10 @@ IF(IS_64_BIT)
         get_filename_component(shader_ext ${s} EXT)
         compile_shader(SOURCE_FILE ${s} OUTPUT_FILE_LIST shader_bytecode OUTPUT_FILE_NAME "${shader_name}.pipeline")
         if (shader_ext STREQUAL ".rgen")
-            compile_shader(SOURCE_FILE ${s} OUTPUT_FILE_LIST shader_bytecode OUTPUT_FILE_NAME "${shader_name}.query" DEFINES "-DKHR_RAY_QUERY" STAGE "comp")
+            # OPTIMIZE: these ray-query variants compile to one big compute
+            # shader each; unoptimized they exceed the Adreno shader compiler's
+            # size limit and vkCreateComputePipelines fails with VK_ERROR_UNKNOWN.
+            compile_shader(SOURCE_FILE ${s} OUTPUT_FILE_LIST shader_bytecode OUTPUT_FILE_NAME "${shader_name}.query" DEFINES "-DKHR_RAY_QUERY" STAGE "comp" OPTIMIZE)
         endif()
     endforeach()
 
@@ -374,6 +383,52 @@ IF(IS_64_BIT)
     if(TARGET glslang-standalone)
         add_dependencies(shaders glslang-standalone)
     endif()
+
+    # Build the Q2RTX-owned manifest from the actual SPIR-V and reflection
+    # outputs, then embed those rows in the host table. This keeps generated
+    # shader data out of the SDK and makes the table reproducible.
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+    if(BUILD_TESTING)
+        add_executable(fsr_image_extent_test refresh/vkpt/tests/fsr_image_extent_test.c)
+        add_test(NAME fsr_image_extent COMMAND fsr_image_extent_test)
+        add_test(NAME vkpt_gradient_texture_reference_check
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/scripts/check_vkpt_gradient_texture.py
+                ${CMAKE_SOURCE_DIR})
+    endif()
+
+    set(FSR3_VKPT_MANIFEST ${CMAKE_CURRENT_BINARY_DIR}/refresh/vkpt/fsr3/fsr3_vkpt_manifest.json)
+    set(FSR3_MANIFEST_ARGS)
+    foreach(row ${Q2RTX_FSR3_SHADER_MANIFEST_ROWS})
+        string(REPLACE "|" ";" row_fields "${row}")
+        list(GET row_fields 0 row_name)
+        list(GET row_fields 1 row_pass)
+        list(GET row_fields 2 row_options)
+        list(GET row_fields 3 row_spirv)
+        list(GET row_fields 4 row_metadata)
+        list(APPEND FSR3_MANIFEST_ARGS --row ${row_name} ${row_pass} ${row_options}
+            ${row_spirv} ${row_metadata})
+    endforeach()
+    add_custom_command(OUTPUT ${FSR3_VKPT_MANIFEST}
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/refresh/vkpt/fsr3/generate_blob_manifest.py
+                ${FSR3_VKPT_MANIFEST} ${FSR3_MANIFEST_ARGS}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/refresh/vkpt/fsr3/generate_blob_manifest.py
+                ${Q2RTX_FSR3_SHADER_BYTECODE})
+
+    set(FSR3_VKPT_TABLE ${CMAKE_CURRENT_BINARY_DIR}/refresh/vkpt/fsr3/fsr3_vkpt_generated.h)
+    add_custom_command(OUTPUT ${FSR3_VKPT_TABLE}
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/refresh/vkpt/fsr3/generate_blob_table.py
+                ${FSR3_VKPT_MANIFEST} ${FSR3_VKPT_TABLE}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/refresh/vkpt/fsr3/generate_blob_table.py
+                ${FSR3_VKPT_MANIFEST})
+    add_library(fsr3_vkpt STATIC refresh/vkpt/fsr3/fsr3_vkpt_blobs.cpp ${FSR3_VKPT_TABLE})
+    target_include_directories(fsr3_vkpt PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/refresh/vkpt/fsr3
+        ${CMAKE_CURRENT_BINARY_DIR}/refresh/vkpt/fsr3)
+    add_executable(fsr3_vkpt_blob_host EXCLUDE_FROM_ALL refresh/vkpt/fsr3/fsr3_vkpt_blob_host.cpp)
+    target_link_libraries(fsr3_vkpt_blob_host PRIVATE fsr3_vkpt)
+    target_include_directories(fsr3_vkpt_blob_host PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/refresh/vkpt/fsr3)
 ENDIF()
 
 # Embed version number
@@ -495,7 +550,10 @@ IF (TARGET client)
 
     IF (CONFIG_VKPT_RENDERER)
         TARGET_SOURCES(client PRIVATE ${SRC_VKPT} ${HEADERS_VKPT})
-        TARGET_INCLUDE_DIRECTORIES(client PRIVATE ${CMAKE_SOURCE_DIR}/extern/Vulkan-Headers/include)
+		TARGET_INCLUDE_DIRECTORIES(client PRIVATE
+			${CMAKE_SOURCE_DIR}/extern/Vulkan-Headers/include
+			${CMAKE_CURRENT_SOURCE_DIR}/refresh/vkpt
+		)
         LINK_DIRECTORIES(client PRIVATE ${CMAKE_SOURCE_DIR})
         TARGET_COMPILE_DEFINITIONS(client PRIVATE REF_VKPT=1 USE_REF=1)
         IF (CONFIG_VKPT_ENABLE_DEVICE_GROUPS)
@@ -509,7 +567,50 @@ IF (TARGET client)
         ELSE ()
         TARGET_LINK_LIBRARIES(client vulkan)
         ENDIF()
-    ENDIF()
+
+		TARGET_SOURCES(client PRIVATE
+			refresh/vkpt/nrd_integration.cpp
+			refresh/vkpt/vkpt.h
+		)
+		TARGET_INCLUDE_DIRECTORIES(client PRIVATE
+			${CMAKE_SOURCE_DIR}/extern/NRD/Include
+			${CMAKE_SOURCE_DIR}/extern/NRD/Integration
+		)
+		TARGET_COMPILE_DEFINITIONS(client PRIVATE CONFIG_VKPT_NRD=1)
+		TARGET_LINK_LIBRARIES(client NRD NRDIntegration NRI)
+		TARGET_LINK_LIBRARIES(client ffx_fsr3upscaler fsr3_vkpt)
+
+		IF (BUILD_TESTING)
+			ENABLE_TESTING()
+			ADD_EXECUTABLE(nrd_math_test refresh/vkpt/nrd_math_test.cpp)
+			TARGET_LINK_LIBRARIES(nrd_math_test PRIVATE MathLib)
+			IF (NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|i.86")
+				TARGET_COMPILE_OPTIONS(nrd_math_test PRIVATE -mssse3)
+			ENDIF()
+			ADD_TEST(NAME nrd_math COMMAND nrd_math_test)
+            include(refresh/vkpt/tests/nrd_tests.cmake)
+			ADD_EXECUTABLE(fsr3_vkpt_backend_test
+				refresh/vkpt/fsr3_backend_vk_test.cpp
+				refresh/vkpt/fsr3_backend_vk.cpp
+			)
+			TARGET_INCLUDE_DIRECTORIES(fsr3_vkpt_backend_test PRIVATE
+				${CMAKE_SOURCE_DIR}/inc
+				${CMAKE_CURRENT_SOURCE_DIR}/refresh/vkpt
+				${CMAKE_SOURCE_DIR}/extern/SDL2
+				${CMAKE_SOURCE_DIR}/extern/Vulkan-Headers/include
+				${CMAKE_SOURCE_DIR}/extern/FidelityFX-SDK/Kits/FidelityFX/api/internal
+			)
+			TARGET_COMPILE_DEFINITIONS(fsr3_vkpt_backend_test PRIVATE
+				HAVE_CONFIG_H=1 VKPT_DEVICE_GROUPS AL_LIBTYPE_STATIC
+				USE_CLIENT=1 USE_FIXED_LIBAL=1 USE_SDL=1 USE_SAVEGAMES=1
+				USE_PROTOCOL_EXTENSIONS=1 REF_VKPT=1 USE_REF=1
+			)
+			TARGET_COMPILE_OPTIONS(fsr3_vkpt_backend_test PRIVATE -UNDEBUG)
+			TARGET_LINK_LIBRARIES(fsr3_vkpt_backend_test PRIVATE fsr3_vkpt vulkan)
+			ADD_DEPENDENCIES(fsr3_vkpt_backend_test fsr3_vkpt_blob_host)
+			ADD_TEST(NAME fsr3_vkpt_backend COMMAND fsr3_vkpt_backend_test)
+		ENDIF()
+	ENDIF()
 
     TARGET_LINK_LIBRARIES(client stb)
     TARGET_LINK_LIBRARIES(client tinyobjloader)

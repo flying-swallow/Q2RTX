@@ -71,6 +71,7 @@ typedef enum {
     PIPELINE_INDIRECT_LIGHTING_FIRST,
     PIPELINE_INDIRECT_LIGHTING_SECOND,
 
+	PIPELINE_NRD_CONFIDENCE,
 	PIPELINE_COUNT
 } pipeline_index_t;
 
@@ -955,8 +956,8 @@ vkpt_pt_create_toplevel(VkCommandBuffer cmd_buf, int idx, const EntityUploadInfo
 		IMAGE_BARRIER(cmd_buf, \
 				.image            = img, \
 				.subresourceRange = subresource_range, \
-				.srcAccessMask    = VK_ACCESS_SHADER_WRITE_BIT, \
-				.dstAccessMask    = VK_ACCESS_SHADER_WRITE_BIT, \
+				.srcAccessMask    = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, \
+				.dstAccessMask    = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, \
 				.oldLayout        = VK_IMAGE_LAYOUT_GENERAL, \
 				.newLayout        = VK_IMAGE_LAYOUT_GENERAL, \
 		); \
@@ -1072,6 +1073,7 @@ vkpt_pt_trace_primary_rays(VkCommandBuffer cmd_buf)
 	BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_CLUSTER_A + frame_idx]);
 	BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_VIEW_DEPTH_A + frame_idx]);
 	BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_NORMAL_A + frame_idx]);
+	BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_GEO_NORMAL_A + frame_idx]);
 	BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_ASVGF_RNG_SEED_A + frame_idx]);
 
 	return VK_SUCCESS;
@@ -1108,6 +1110,7 @@ vkpt_pt_trace_reflections(VkCommandBuffer cmd_buf, int bounce)
 	BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_CLUSTER_A + frame_idx]);
 	BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_VIEW_DEPTH_A + frame_idx]);
 	BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_NORMAL_A + frame_idx]);
+	BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_GEO_NORMAL_A + frame_idx]);
 
 	return VK_SUCCESS;
 }
@@ -1138,6 +1141,9 @@ vkpt_pt_trace_lighting(VkCommandBuffer cmd_buf, float num_bounce_rays)
 	BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_COLOR_LF_COCG]);
 	BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_COLOR_HF]);
 	BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_COLOR_SPEC]);
+    BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_SPEC_MOMENT]);
+    BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_SPEC_FIRST_DIRECTION]);
+    BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_NRD_HITDIST]);
 
 	BUFFER_BARRIER(cmd_buf,
 		.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
@@ -1177,7 +1183,15 @@ vkpt_pt_trace_lighting(VkCommandBuffer cmd_buf, float num_bounce_rays)
 				BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_COLOR_LF_COCG]);
 				BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_COLOR_HF]);
 				BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_COLOR_SPEC]);
+				BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_SPEC_MOMENT]);
+				BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_SPEC_FIRST_DIRECTION]);
+				BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_NRD_HITDIST]);
 				BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_BOUNCE_THROUGHPUT]);
+                // The next bounce reads all four outputs together. An image
+                // barrier for throughput does not make these other images visible.
+                BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_SHADING_POSITION]);
+                BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_VIEW_DIRECTION2]);
+                BARRIER_COMPUTE(cmd_buf, qvk.images[VKPT_IMG_PT_GEO_NORMAL2]);
 
 				END_PERF_MARKER(cmd_buf, PROFILER_INDIRECT_LIGHTING_0 + bounce_ray);
 			}
@@ -1189,6 +1203,21 @@ vkpt_pt_trace_lighting(VkCommandBuffer cmd_buf, float num_bounce_rays)
 	set_current_gpu(cmd_buf, ALL_GPUS);
 
 	return VK_SUCCESS;
+}
+
+VkResult
+vkpt_pt_trace_nrd_confidence(VkCommandBuffer cmd_buf)
+{
+    // Also orders last frame's sample reads before overwriting that parity.
+    for (int image = VKPT_IMG_NRD_CONFIDENCE_SAMPLE_0; image <= VKPT_IMG_NRD_CONFIDENCE_GRADIENT_1; image++)
+        BARRIER_COMPUTE(cmd_buf, qvk.images[image]);
+    pt_push_constants_t push = {0};
+    push.gpu_index = -1;
+    dispatch_rays(cmd_buf, PIPELINE_NRD_CONFIDENCE, push,
+        (qvk.extent_render.width + 4) / 5, (qvk.extent_render.height + 4) / 5, 1);
+    for (int image = VKPT_IMG_NRD_CONFIDENCE_SAMPLE_0; image <= VKPT_IMG_NRD_CONFIDENCE_GRADIENT_1; image++)
+        BARRIER_COMPUTE(cmd_buf, qvk.images[image]);
+    return VK_SUCCESS;
 }
 
 VkResult
@@ -1270,6 +1299,10 @@ vkpt_pt_create_pipelines()
 
 		switch (index)
 		{
+        case PIPELINE_NRD_CONFIDENCE:
+            shader_stages[0].module = qvk.shader_modules[QVK_MOD_NRD_CONFIDENCE_RGEN];
+            shader_stages[0].pSpecializationInfo = NULL;
+            break;
 		case PIPELINE_PRIMARY_RAYS:
 			shader_stages[0].module = qvk.shader_modules[QVK_MOD_PRIMARY_RAYS_RGEN];
 			shader_stages[0].pSpecializationInfo = NULL;
